@@ -246,12 +246,14 @@ export const Message = memo(function Message({ message, modelLabel, onBranch, on
   }
   return (
     <article className="msg assistant">
+      {message.woke ? <div className="msg-note">{message.woke.notices?.length ? message.woke.notices.join(' · ') : 'A background task ended.'}</div> : null}
       <div className="msg-meta">{modelLabel}{message.route?.effort ? ` · ${message.route.effort}` : ''}{message.duration ? ` · ${elapsed(message.duration)}` : ''}{message.stopped ? ' · stopped' : ''}
         {message.route ? <span className="msg-route" title={ROUTE_BY[message.route.by]}> · Overseer: {message.route.reason}</span> : null}</div>
       <Parts parts={message.parts} artifacts={!message.stopped && !message.error} />
       {message.error ? <div className="msg-error"><CircleAlert size={14} /><span>{message.error}</span>
         {message.signIn && onSignIn && !busy ? <SignInButton onSignIn={() => onSignIn(message)} /> : null}</div> : null}
       {!message.parts.length && !message.error ? <div className="muted">No response.</div> : null}
+      {message.notes?.map((note, i) => <div key={i} className="msg-note">{note}</div>)}
       {textOf(message) ? <div className="msg-actions start"><CopyAction message={message} /><DownloadAction message={message} /></div> : null}
     </article>
   );

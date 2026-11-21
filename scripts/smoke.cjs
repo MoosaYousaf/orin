@@ -198,6 +198,12 @@ app.whenReady().then(async () => {
     await shot(win, '1b-activity');
     win.webContents.send('run-state', { threadId: 't1', running: false });
     await until(win, `!document.querySelector('.approval')`, 'live reply clears');
+    // Background tasks of the Claude Code process: a strip above the composer, a sidebar mark, and fixed settings.
+    win.webContents.send('tasks', { threadId: 't1', tasks: [{ id: 'b1', type: 'local_bash', description: 'npm run dev', startedAt: Date.now() - 65000 }] });
+    await until(win, `document.querySelector('.task-head')?.textContent === 'Waiting for background work · 1' && document.querySelector('.task-name')?.textContent === 'npm run dev' && /^1:0[5-9]$/.test(document.querySelector('.task-time')?.textContent) && !!document.querySelector('.thread-row .dot-wait') && document.querySelector('.composer-row button[aria-label="Access mode"]')?.disabled === true`, 'background tasks show above the composer and in the sidebar');
+    await shot(win, '1b-tasks');
+    win.webContents.send('tasks', { threadId: 't1', tasks: [] });
+    await until(win, `!document.querySelector('.task-strip') && !document.querySelector('.dot-wait')`, 'the task strip clears');
     await click(win, '.topbar [title="Changes"]');
     await until(win, `document.querySelector('.branch-btn')?.textContent === 'feature/parser' && document.querySelector('.pr-card .pr-title')?.textContent.includes('#12')`, 'Changes panel shows the branch and its pull request');
     await until(win, `document.querySelector('.pr-meta')?.textContent.includes('Changes requested') && document.querySelector('.pr-checks')?.dataset.tip === 'Checks: 2 passed, 1 failed, 1 pending'`, 'pull request review and checks');

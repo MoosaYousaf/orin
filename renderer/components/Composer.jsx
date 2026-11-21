@@ -136,8 +136,36 @@ const attachmentDrafts = new Map();
 export const getDraft = threadId => drafts.get(threadId) ?? '';
 export const setDraft = (threadId, text) => { drafts.set(threadId, text); window.dispatchEvent(new CustomEvent('orin-draft', { detail: threadId })); };
 
+const NO_TASKS = [];
+const TASK_KIND = { local_bash: 'Shell', local_agent: 'Agent', local_workflow: 'Workflow' };
+const clock = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return s < 3600 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`; };
+
+// Background tasks of the conversation's Claude Code process. The next message goes into the same process,
+// and the CLI answers by itself when a task ends.
+function TaskStrip({ threadId, tasks, running }) {
+  const [now, setNow] = useState(Date.now());
+  const [stopping, setStopping] = useState(() => new Set());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
+  const stop = id => { setStopping(s => new Set(s).add(id)); call('run:stop-task', threadId, id).catch(error => { toast(error); setStopping(s => { const n = new Set(s); n.delete(id); return n; }); }); };
+  return (
+    <div className="task-strip" role="status" aria-label="Background tasks">
+      <div className="task-head">{running ? 'Background tasks' : 'Waiting for background work'} · {tasks.length}</div>
+      {tasks.map(t => (
+        <div key={t.id} className="task-row">
+          <span className="task-kind">{TASK_KIND[t.type] || 'Task'}</span>
+          <span className="task-name" title={t.description}>{t.description || t.id}</span>
+          <span className="task-time">{clock(now - t.startedAt)}</span>
+          <button className="task-stop" disabled={stopping.has(t.id)} onClick={() => stop(t.id)} aria-label={`Stop ${t.description || 'task'}`}>{stopping.has(t.id) ? 'Stopping' : 'Stop'}</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Composer({ thread, workspace, modelLabel }) {
   const running = useStore(s => !!s.live[thread.id]);
+  const tasks = useStore(s => s.tasks[thread.id]) || NO_TASKS;
+  const waiting = tasks.length > 0; // settings stay fixed while the process waits for its tasks
   const app = useStore(s => s.app);
   const [text, setText] = useState(() => drafts.get(thread.id) ?? '');
   const [files, updateFiles] = useState(() => attachmentDrafts.get(thread.id) || []);
@@ -256,6 +284,7 @@ export function Composer({ thread, workspace, modelLabel }) {
   return (
     <div className="composer-wrap">
       <CommandMenu open={menu} items={items} index={index} onPick={choose} onHover={setIndex} />
+      {waiting ? <TaskStrip threadId={thread.id} tasks={tasks} running={running} /> : null}
       {suggestions.length && !text && !menu ? (
         <SuggestionRow suggestions={suggestions} onPick={s => { update(s); input.current?.focus(); }} />
       ) : null}
@@ -292,12 +321,12 @@ export function Composer({ thread, workspace, modelLabel }) {
       <div className="composer-row">
         <button className="icon-btn tip" data-tip="Attach files" aria-label="Attach files" onClick={pick}><Plus size={16} /></button>
         <MicButton threadId={thread.id} />
-        <OptionPicker options={modes} value={mode.id} disabled={running} onPick={onAccess} title={mode.detail} danger={mode.danger} label="Access mode" openKey={`${thread.id}:access`} />
+        <OptionPicker options={modes} value={mode.id} disabled={running || waiting} onPick={onAccess} title={mode.detail} danger={mode.danger} label="Access mode" openKey={`${thread.id}:access`} />
         <span className="grow" />
-        <ModelPicker thread={thread} label={thread.overseer ? `Overseer · ${modelLabel.split(' · ')[0]}` : modelLabel} disabled={running} openKey={`${thread.id}:model`} />
+        <ModelPicker thread={thread} label={thread.overseer ? `Overseer · ${modelLabel.split(' · ')[0]}` : modelLabel} disabled={running || waiting} openKey={`${thread.id}:model`} />
         {/* The Overseer sets the effort of each turn itself. */}
         {preset?.efforts?.length > 1 && !thread.overseer ? (
-          <OptionPicker options={preset.efforts.map(e => ({ id: e, label: e ? cap(e) : 'Default effort' }))} value={thread.effort} disabled={running} onPick={effort => setting({ effort })} title="Effort" label="Effort" align="end" openKey={`${thread.id}:effort`} />
+          <OptionPicker options={preset.efforts.map(e => ({ id: e, label: e ? cap(e) : 'Default effort' }))} value={thread.effort} disabled={running || waiting} onPick={effort => setting({ effort })} title="Effort" label="Effort" align="end" openKey={`${thread.id}:effort`} />
         ) : null}
         <UsageRing thread={thread} preset={preset} />
       </div>

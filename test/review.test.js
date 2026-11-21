@@ -199,7 +199,7 @@ test('review: cancelling an engine source download aborts the network request', 
   } finally { engine.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('review: live CLI argv contains only a private MCP config path that is removed after the turn', async () => {
+test('review: live CLI argv contains only a private MCP config path that is removed when the CLI exits', async () => {
   const root = tmp(), home = process.env.HOME;
   const bin = path.join(root, '.local', 'bin'); fs.mkdirSync(bin, { recursive: true });
   const executable = path.join(bin, 'claude');
@@ -224,6 +224,8 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', ()
     assert.equal(reply.mode, 0o600);
     assert.equal(reply.secret, 'orin-test-secret');
     assert.ok(!JSON.stringify(reply.argv).includes('orin-test-secret'));
+    // The process can outlive the turn (background tasks), so the file goes when the process exits.
+    for (let i = 0; i < 40 && fs.existsSync(reply.configPath); i++) await new Promise(r => setTimeout(r, 50));
     assert.equal(fs.existsSync(reply.configPath), false);
   } finally { process.env.HOME = home; cli.cliPath('claude', true); fs.rmSync(root, { recursive: true, force: true }); }
 });

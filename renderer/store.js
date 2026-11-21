@@ -10,6 +10,7 @@ let state = {
   threads: {}, // id -> thread with messages
   live: {}, // threadId -> streaming parts
   started: {}, // threadId -> when the running turn started (ms)
+  tasks: {}, // threadId -> background tasks of its open Claude Code process
   approvals: [], // approval requests and model questions; questions carry `questions`
   // panes: the threads shown side by side; threadId is the active pane. sizes: pane width fractions.
   // terminal: the Terminal page is open. tabs: the page each sidebar tab (chat, code) showed last.
@@ -53,7 +54,7 @@ export async function refresh() {
   // When the open thread was deleted, another pane takes over. No open thread (home or a project page) stays that way.
   const threadId = !ui.threadId || app.threads.some(t => t.id === ui.threadId) ? ui.threadId : panes[0] || null;
   const projectId = app.workspaces.some(w => w.id === ui.projectId && w.kind === 'project') ? ui.projectId : null;
-  set({ app, ui: { ...ui, view, workspaceId, threadId, projectId, panes, sizes: panes.length === ui.panes.length ? ui.sizes : equal(panes.length) } });
+  set({ app, tasks: app.background || {}, ui: { ...ui, view, workspaceId, threadId, projectId, panes, sizes: panes.length === ui.panes.length ? ui.sizes : equal(panes.length) } });
   if (app.warning && !refresh.warned) { refresh.warned = true; toast(app.warning); }
 }
 export async function loadThread(id) {
@@ -150,6 +151,11 @@ export function start() {
   // Engine status and download progress arrive on their own, without a full refresh.
   api.on('local', patch => set(s => (s.app ? { app: { ...s.app, local: { ...s.app.local, ...patch } } } : {})));
   api.on('thread-changed', ({ threadId }) => { if (state.threads[threadId] || state.ui.threadId === threadId) loadThread(threadId).catch(toast); refresh().catch(toast); });
+  api.on('tasks', ({ threadId, tasks }) => set(s => {
+    const next = { ...s.tasks };
+    if (tasks.length) next[threadId] = tasks; else delete next[threadId];
+    return { tasks: next };
+  }));
   api.on('run-update', ({ threadId, parts }) => set(s => ({ live: { ...s.live, [threadId]: parts } })));
   api.on('run-state', ({ threadId, running, error, startedAt }) => {
     if (running) set(s => ({ live: { ...s.live, [threadId]: s.live[threadId] || [] }, started: { ...s.started, [threadId]: startedAt || Date.now() } }));

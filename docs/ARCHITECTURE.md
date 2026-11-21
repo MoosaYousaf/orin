@@ -14,7 +14,8 @@ electron/main.js
   │   ├─ draft.js      the only stream reducer: events → message parts
   │   └─ providers/
   │       ├─ catalog.js     presets for every route, access modes, settings validation
-  │       ├─ cli.js         Claude Code / Codex / Gemini / Copilot CLI: argv, prompt on stdin, JSON event parsing, Claude Code control requests
+  │       ├─ cli.js         Claude Code / Codex / Gemini / Copilot CLI: argv, prompt on stdin, JSON event parsing
+  │       ├─ claude-session.js  one Claude Code process per conversation: control requests, background tasks, wake-up turns
   │       ├─ codex-server.js  Codex Ask first through `codex app-server` JSON-RPC
   │       ├─ copilot-acp.js   Copilot Ask first through `copilot --acp` (Agent Client Protocol)
   │       ├─ usage.js         Context usage: Codex and Copilot session files, Claude context sizes
@@ -63,7 +64,30 @@ Before each run in a code workspace, `git.snapshot` copies the real index (with 
 
 ## Approvals
 
-`Runner.ask` is the one approval flow. API runs call it before each MCP tool call. Claude Code always runs with `--input-format stream-json --permission-prompt-tool stdio`. In **Ask first** the CLI sends each permission prompt as a `can_use_tool` control request on stdout. Orin answers with a `control_response` on stdin, and closes stdin after the `result` event. In the other modes Orin denies permission prompts, as the CLI does when nobody can answer. In **Ask first**, Codex runs `codex app-server` with `approvalPolicy: untrusted` and the workspace-write sandbox. Orin answers `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept` or `decline`. Other server requests get a JSON-RPC error. Thread ids are the same as in `codex exec`, so a thread can change mode and still resume. In **Ask first**, Copilot runs `copilot --acp` with allow-all off (Orin turns it off if a saved setting has it on). Orin declares no fs or terminal capability, so Copilot uses its own tools. Orin answers `session/request_permission` with the `allow_once` or `reject_once` option. A resumed thread uses `session/load`; Orin ignores the replayed updates. ACP session ids are the same as `--session-id`. A Deny makes Copilot end the turn ("Info: Operation cancelled by user"). Copilot sends such notices as message chunks, so Orin puts each one in its own paragraph. **Always allow** adds the tool name to the thread's `allowedTools`.
+`Runner.ask` is the one approval flow. API runs call it before each MCP tool call. Claude Code always runs with `--input-format stream-json --permission-prompt-tool stdio`. In **Ask first** the CLI sends each permission prompt as a `can_use_tool` control request on stdout. Orin answers with a `control_response` on stdin. Stdin stays open after the `result` event while background tasks run (see Background tasks). In the other modes Orin denies permission prompts, as the CLI does when nobody can answer. In **Ask first**, Codex runs `codex app-server` with `approvalPolicy: untrusted` and the workspace-write sandbox. Orin answers `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` with `accept` or `decline`. Other server requests get a JSON-RPC error. Thread ids are the same as in `codex exec`, so a thread can change mode and still resume. In **Ask first**, Copilot runs `copilot --acp` with allow-all off (Orin turns it off if a saved setting has it on). Orin declares no fs or terminal capability, so Copilot uses its own tools. Orin answers `session/request_permission` with the `allow_once` or `reject_once` option. A resumed thread uses `session/load`; Orin ignores the replayed updates. ACP session ids are the same as `--session-id`. A Deny makes Copilot end the turn ("Info: Operation cancelled by user"). Copilot sends such notices as message chunks, so Orin puts each one in its own paragraph. **Always allow** adds the tool name to the thread's `allowedTools`.
+
+## Background tasks
+
+Claude Code can run shell commands and subagents in the background. Each conversation has one Claude Code process (`electron/providers/claude-session.js`). The process outlives the turn while it has background tasks. Facts measured on Claude Code 2.1.314:
+
+- `system/background_tasks_changed` carries the full task list (`task_id`, `task_type` such as `local_bash` or `local_agent`, `description`).
+- A task that ends sends `task_notification`. While stdin is open, the CLI then starts a turn by itself (`system init`, assistant messages, `result`).
+- The control request `stop_task` stops a task. The status becomes `stopped`, and no wake-up turn starts.
+- A user message sent while a task runs is a normal turn in the same process.
+
+Orin uses these facts as follows:
+
+- After a `result`, stdin stays open while tasks run. The user's next message goes into the same process, so two processes never share one session.
+- A turn that starts without an Orin message is a wake-up turn. The runner shows it as a live run and saves it as a new reply with `woke: { notices }` (the task summaries). The renderer shows the notices above the reply.
+- 5 s after the last task ends, stdin closes and the CLI exits. Orin reads the output until the process exits, so a late wake-up turn still reaches the conversation.
+- After 30 idle minutes with tasks, Orin stops them with `stop_task`, closes stdin, and adds a note under the last reply (`notes`).
+- Stop on a reply sends `interrupt` when tasks run, so the tasks continue. Events of the interrupted turn are dropped until its `result` (at most 10 s). A message sent during that time waits for that `result`. Without tasks, Stop ends the process as before.
+- While tasks run, the model, effort, and access mode are fixed, and rewind and edit are refused, because they need a new process. A changed connector config (a refreshed token) does not restart the waiting process; it applies to the next process. The Overseer does not move such a conversation.
+- The renderer gets the list on the `tasks` event and in `state.background`. It shows a strip above the composer with a Stop button for each task (`run:stop-task`) and a ring in the sidebar row.
+- Quitting asks first when tasks run, because the tasks end with Orin. The install handoff then fails safely and replaces nothing.
+- Deleting the conversation ends its process and tasks.
+
+Codex, Gemini, and Copilot send no such task events, so their turns do not change.
 
 ## Overseer
 

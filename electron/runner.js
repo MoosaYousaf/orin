@@ -63,6 +63,7 @@ class Runner {
     this.runs = new Map(); // threadId -> { controller, draft }
     this.helpers = new Set();
     this.approvals = new Map(); // approvalId -> resolve
+    this.tasks = new Map(); // threadId -> background tasks of its open Claude Code process
   }
 
   // CLI connections exist when the CLI is installed; API connections are what the user added.
@@ -127,6 +128,7 @@ class Runner {
   setThreadSettings(threadId, next) {
     const thread = this.store.thread(threadId);
     if (this.runs.has(threadId)) throw new Error('Wait for the current reply to finish.');
+    this.assertNoTasks(threadId);
     const connectionId = next.connectionId ?? thread.connectionId;
     const { connection, preset } = this.resolve(connectionId);
     const mode = mapMode(next.mode ?? thread.baseMode ?? thread.mode, preset, 'mode' in next ? preset : { kind: thread.baseKind || this.resolve(thread.connectionId).preset.kind });
@@ -188,6 +190,7 @@ class Runner {
     for (const part of commands.mentions(text, workspace.path)) if (!attached.some(p => p.path === part.path)) attached.push(part);
 
     if (editMessageId) {
+      this.assertNoTasks(threadId);
       const index = thread.messages.findIndex(m => m.id === editMessageId && m.role === 'user');
       if (index < 0) throw new Error('Message not found.');
       this.store.update(threadId, { messages: thread.messages.slice(0, index), sessionId: null, replay: index > 0 });
@@ -205,7 +208,8 @@ class Runner {
   async execute({ threadId, thread, workspace, connection, preset, history, text, attached = [], draft, controller, userId }) {
     // The Overseer picks this turn's model before anything runs. A failed route keeps the current model.
     let route = null;
-    if (thread.overseer) {
+    // A conversation with background tasks keeps its process, so the Overseer does not move it.
+    if (thread.overseer && !this.tasks.has(threadId)) {
       route = await this.route(threadId, { text, workspace, files: attached.length, history, signal: controller.signal }).catch(() => null);
       if (route) ({ connection, preset } = this.resolve((thread = this.store.thread(threadId)).connectionId));
     }
@@ -217,18 +221,8 @@ class Runner {
     // A /name file command or skill becomes its prompt text. The message shows what the user typed.
     const expanded = await commands.expand(text, workspace.path, preset.cli).catch(() => null);
     if (expanded) { this.store.patchMessage(threadId, userId, { prompt: expanded }); text = expanded; }
-    let sent = -1;
-    const ticker = setInterval(() => { if (draft.version !== sent) { sent = draft.version; this.send('run-update', { threadId, parts: draft.parts }); } }, UPDATE_MS);
-    const finish = message => {
-      clearInterval(ticker);
-      const startedAt = this.runs.get(threadId)?.startedAt;
-      this.runs.delete(threadId);
-      for (const [id, entry] of this.approvals) if (entry.threadId === threadId) this.answer(id, null);
-      const saved = message && this.store.append(threadId, { role: 'assistant', connectionId: thread.connectionId, model: thread.model, ...(route ? { route: { reason: route.reason, by: route.by, effort: thread.effort } } : {}), ...(draft.suggestions.length ? { suggestions: draft.suggestions } : {}), ...(startedAt ? { duration: Date.now() - startedAt } : {}), ...(draft.usage ? { usage: { used: draft.usage.used, window: draft.usage.window || contextWindow(thread.model) } } : {}), ...message });
-      this.send('thread-changed', { threadId });
-      this.send('run-state', { threadId, running: false, error: message?.error });
-      return saved;
-    };
+    const ticker = this.ticker(threadId, draft);
+    const finish = message => this.endRun(threadId, { thread, draft, ticker, message: message && { ...(route ? { route: { reason: route.reason, by: route.by, effort: thread.effort } } : {}), ...message } });
 
     try {
       const messages = this.store.thread(threadId).messages;
@@ -243,7 +237,8 @@ class Runner {
           mcpServers: claude ? await this.mcp.claudeConfigs(this.connectorSignIn(threadId, draft)) : this.mcp.enabledConfigs(),
           onSession: id => { if (id !== thread.sessionId) this.store.update(threadId, { sessionId: id, replay: false }); },
           approve: request => this.ask(threadId, { server: preset.name, ...request }),
-          question: request => this.question(threadId, { server: preset.name, ...request }) });
+          question: request => this.question(threadId, { server: preset.name, ...request }),
+          background: claude ? this.backgroundHooks(threadId) : undefined });
       } else {
         // A small local model misuses Orin's own tools (a 0.5B model asked about 50 junk questions in a row), and their
         // text costs about 1,600 tokens of prompt on every first turn. Local models get only the connectors the user added.
@@ -258,9 +253,7 @@ class Runner {
       }
       const stopped = controller.signal.aborted;
       saved = finish(stopped && !draft.parts.length ? null : { parts: draft.final(), native: result?.native, ...(stopped ? { stopped: true } : {}) });
-      // Optional short helper requests provide up to three suggestions.
-      // Suggestions from a local model would load it again and take minutes on a small Mac, so they are skipped.
-      if (saved && !stopped && !saved.error && connection.id !== LOCAL_ID && preset.cli !== 'copilot' && this.store.data.preferences.suggestReplies) this.suggestReplies(threadId, connection, preset, saved).catch(() => {});
+      this.afterReply(threadId, connection, preset, saved);
     } catch (error) {
       // A user stop is not a failure: keep whatever arrived and mark it stopped.
       if (controller.signal.aborted) finish(draft.parts.length ? { parts: draft.final(), stopped: true } : null);
@@ -268,6 +261,93 @@ class Runner {
       else finish({ parts: draft.final(), error: error.message || String(error), ...(preset.kind === 'cli' && cli.LOGIN[preset.cli] && (error.signIn || cli.signedOut(preset.cli, error.message)) ? { signIn: connection.id } : {}) });
     }
   }
+  // Sends the live parts to the renderer at most every UPDATE_MS.
+  ticker(threadId, draft) {
+    let sent = -1;
+    return setInterval(() => { if (draft.version !== sent) { sent = draft.version; this.send('run-update', { threadId, parts: draft.parts }); } }, UPDATE_MS);
+  }
+  // Ends a run and saves its reply (or nothing, for a stop before any output).
+  endRun(threadId, { thread, draft, ticker, message }) {
+    clearInterval(ticker);
+    const startedAt = this.runs.get(threadId)?.startedAt;
+    this.runs.delete(threadId);
+    for (const [id, entry] of this.approvals) if (entry.threadId === threadId) this.answer(id, null);
+    const saved = message && this.store.append(threadId, { role: 'assistant', connectionId: thread.connectionId, model: thread.model, ...(draft.suggestions.length ? { suggestions: draft.suggestions } : {}), ...(startedAt ? { duration: Date.now() - startedAt } : {}), ...(draft.usage ? { usage: { used: draft.usage.used, window: draft.usage.window || contextWindow(thread.model) } } : {}), ...message });
+    this.send('thread-changed', { threadId });
+    this.send('run-state', { threadId, running: false, error: message?.error });
+    return saved;
+  }
+  // Optional short helper requests provide up to three suggestions.
+  // Suggestions from a local model would load it again and take minutes on a small Mac, so they are skipped.
+  afterReply(threadId, connection, preset, saved) {
+    if (saved && !saved.stopped && !saved.error && connection.id !== LOCAL_ID && preset.cli !== 'copilot' && this.store.data.preferences.suggestReplies) this.suggestReplies(threadId, connection, preset, saved).catch(() => {});
+  }
+
+  // Claude Code keeps its process while background tasks run (claude-session.js). The renderer shows the tasks,
+  // and a turn that the CLI starts when a task ends becomes a new reply with a note.
+  backgroundHooks(threadId) {
+    return {
+      onTasks: tasks => {
+        if (tasks.length) this.tasks.set(threadId, tasks.map(t => ({ ...t }))); else this.tasks.delete(threadId);
+        this.send('tasks', { threadId, tasks: this.tasks.get(threadId) || [] });
+      },
+      onWake: ({ notices }) => this.wake(threadId, notices),
+      onExpire: ({ count, minutes }) => this.note(threadId, `Orin stopped ${count === 1 ? 'a background task' : `${count} background tasks`} after waiting ${minutes} minutes.`)
+    };
+  }
+  wake(threadId, notices) {
+    if (!this.store.data.threads.some(t => t.id === threadId)) return null;
+    const thread = this.store.thread(threadId);
+    const { connection, preset } = this.resolve(thread.connectionId);
+    const woke = { notices: notices.slice(0, 5) };
+    // The user's next message is being prepared (its run exists, the CLI has not received it): this reply is saved
+    // first, without live display, and that message's turn waits for it.
+    if (this.runs.has(threadId)) {
+      const draft = new Draft();
+      return { draft, mode: thread.mode, onSession() {}, approve: () => ({ decision: Promise.resolve('deny'), cancel() {} }), question: () => ({ decision: Promise.resolve(null), cancel() {} }),
+        settle: error => {
+          if (!draft.parts.length && !error) return;
+          this.store.append(threadId, { role: 'assistant', connectionId: thread.connectionId, model: thread.model, parts: draft.final(), woke, ...(error ? { error: error.message || String(error) } : {}) });
+          this.send('thread-changed', { threadId });
+        } };
+    }
+    const draft = new Draft(), controller = new AbortController();
+    this.runs.set(threadId, { controller, draft, startedAt: Date.now() });
+    this.send('thread-changed', { threadId });
+    this.send('run-state', { threadId, running: true, startedAt: this.runs.get(threadId).startedAt });
+    const ticker = this.ticker(threadId, draft);
+    return {
+      draft, signal: controller.signal, mode: thread.mode,
+      onSession: id => { if (id !== this.store.thread(threadId).sessionId) this.store.update(threadId, { sessionId: id, replay: false }); },
+      approve: request => this.ask(threadId, { server: preset.name, ...request }),
+      question: request => this.question(threadId, { server: preset.name, ...request }),
+      settle: (error, result) => {
+        const stopped = !!result?.stopped;
+        const message = error ? { parts: draft.final(), woke, error: error.message || String(error) } : stopped && !draft.parts.length ? null : { parts: draft.final(), woke, ...(stopped ? { stopped: true } : {}) };
+        this.afterReply(threadId, connection, preset, this.endRun(threadId, { thread, draft, ticker, message }));
+      }
+    };
+  }
+  // A short line under the latest reply, for events between turns.
+  note(threadId, text) {
+    const thread = this.store.data.threads.find(t => t.id === threadId);
+    const last = thread?.messages.findLast(m => m.role === 'assistant');
+    if (!last) return;
+    this.store.patchMessage(threadId, last.id, { notes: [...(last.notes || []), text] });
+    this.send('thread-changed', { threadId });
+  }
+  assertNoTasks(threadId) {
+    if (this.tasks.has(threadId)) throw new Error('Background tasks are running in this conversation. Stop them first.');
+  }
+  stopTask(threadId, taskId) {
+    const session = cli.background(threadId);
+    if (!session) throw new Error('This conversation has no background tasks.');
+    return session.stopTask(taskId);
+  }
+  // Ends the process of a conversation that is deleted, with its background tasks.
+  endBackground(threadId) { cli.background(threadId)?.end(); this.tasks.delete(threadId); }
+  backgroundTasks() { return Object.fromEntries(this.tasks); }
+
   // One extra request (Haiku on Claude, else the same model); CLIs run once without a session or tools. A failure only means no suggestions.
   async suggestReplies(threadId, connection, preset, reply) {
     const thread = this.store.thread(threadId);
@@ -295,6 +375,7 @@ class Runner {
   // The CLI session continued past that point, so the next turn starts a new session from the transcript.
   async rewind(threadId, messageId, { conversation = true, code = false } = {}) {
     if (this.runs.has(threadId)) throw new Error('Stop the reply first.');
+    this.assertNoTasks(threadId);
     const thread = this.store.thread(threadId);
     const index = thread.messages.findIndex(m => m.id === messageId && m.role === 'user');
     if (index < 0) throw new Error('Message not found.');

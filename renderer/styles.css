@@ -122,6 +122,7 @@ kbd { font-size: 10.5px; color: var(--text-3); margin-left: auto; letter-spacing
 .thread-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-time { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .dot-live { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: pulse 1.4s ease-in-out infinite; }
+.dot-wait { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--accent); flex: none; }
 .ws-more { padding: 4px 8px; font-size: 12px; color: var(--text-3); }
 .ws-more:hover { color: var(--text); }
 .ws-empty { padding: 4px 8px; font-size: 12px; color: var(--text-3); }
@@ -679,3 +680,15 @@ kbd { font: 500 11px var(--mono); padding: 1px 5px; border: 1px solid var(--bord
 .lf-size { font-variant-numeric: tabular-nums; text-align: right; }
 .lf-fit.ok { color: var(--success); } .lf-fit.warn { color: var(--warning); } .lf-fit.bad { color: var(--danger); }
 .lf-rec { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-2); }
+
+/* Background tasks of a Claude Code process: a quiet strip above the composer. */
+.task-strip { margin: 0 0 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 2px; font-size: 12px; }
+.task-head { color: var(--text-2); font-weight: 600; }
+.task-row { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.task-kind { color: var(--text-3); flex: none; width: 58px; }
+.task-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-time { color: var(--text-3); font-variant-numeric: tabular-nums; flex: none; }
+.task-stop { flex: none; padding: 2px 8px; border-radius: 6px; color: var(--text-2); border: 1px solid var(--border); }
+.task-stop:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+.task-stop:disabled { opacity: .5; }
+.msg-note { font-size: 12px; color: var(--text-3); margin: 2px 0 6px; }

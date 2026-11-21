@@ -50,7 +50,7 @@ const reorder = guard((ids, id, target) => {
 });
 let dragging = null; // { id, ids } of the row being dragged; a drop works only inside the same list
 
-const ThreadRow = memo(function ThreadRow({ thread, active, running, ids }) {
+const ThreadRow = memo(function ThreadRow({ thread, active, running, waiting, ids }) {
   const [anchor, setAnchor] = useState(null);
   const more = useRef(null);
   const [drop, setDrop] = useState(null); // 'before' | 'after'
@@ -71,7 +71,7 @@ const ThreadRow = memo(function ThreadRow({ thread, active, running, ids }) {
       }}>
       {thread.pinned ? <Pin size={11} className="thread-pin" /> : null}
       <span className="thread-title">{thread.title}</span>
-      {running ? <span className="dot-live" aria-label="Running" /> : <span className="thread-time">{ago(thread.updatedAt)}</span>}
+      {running ? <span className="dot-live" aria-label="Running" /> : waiting ? <span className="dot-wait" title="Waiting for background work" aria-label="Waiting for background work" /> : <span className="thread-time">{ago(thread.updatedAt)}</span>}
       <button ref={more} className="thread-more" aria-label={`Options for ${thread.title}`} onClick={e => {
         e.stopPropagation();
         // A hidden button (opened from the keyboard or a script) has no size, so the row gives the position.
@@ -89,6 +89,7 @@ function Workspace({ workspace, threads }) {
   const activeId = useStore(s => s.ui.threadId);
   const panes = useStore(s => s.ui.panes);
   const running = useStore(s => s.app.running);
+  const tasks = useStore(s => s.tasks);
   const shown = all ? threads : threads.slice(0, LIMIT);
   const ids = useMemo(() => threads.map(t => t.id), [threads.map(t => t.id).join()]);
   const remove = guard(async () => { if (await askConfirm({ title: `Remove “${workspace.name}”?`, message: `Its ${threads.length} conversations are removed from Orin. The files on disk stay.`, confirmLabel: 'Remove', danger: true })) await call('workspace:remove', workspace.id); });
@@ -104,7 +105,7 @@ function Workspace({ workspace, threads }) {
           <button className="icon-btn sm" title={workspace.kind === 'code' ? 'New conversation here' : 'New chat here'} onClick={guard(() => newThread(workspace.id))}><Plus size={14} /></button>
         </span>
       </div>
-      {shown.map(t => <ThreadRow key={t.id} thread={t} ids={ids} active={t.id === activeId || panes.includes(t.id)} running={running.includes(t.id)} />)}
+      {shown.map(t => <ThreadRow key={t.id} thread={t} ids={ids} active={t.id === activeId || panes.includes(t.id)} running={running.includes(t.id)} waiting={!!tasks[t.id]} />)}
       {threads.length > LIMIT ? <button className="ws-more" onClick={() => setAll(!all)}>{all ? 'Show less' : `Show ${threads.length - LIMIT} more`}</button> : null}
       {!threads.length ? <div className="ws-empty">No conversations yet</div> : null}
     </section>
@@ -116,10 +117,11 @@ function Pinned({ threads }) {
   const activeId = useStore(s => s.ui.threadId);
   const panes = useStore(s => s.ui.panes);
   const running = useStore(s => s.app.running);
+  const tasks = useStore(s => s.tasks);
   return (
     <section className="ws">
       <div className="ws-head"><span className="ws-name">Pinned</span></div>
-      {threads.map(t => <ThreadRow key={t.id} thread={t} ids={ids} active={t.id === activeId || panes.includes(t.id)} running={running.includes(t.id)} />)}
+      {threads.map(t => <ThreadRow key={t.id} thread={t} ids={ids} active={t.id === activeId || panes.includes(t.id)} running={running.includes(t.id)} waiting={!!tasks[t.id]} />)}
     </section>
   );
 }

@@ -125,7 +125,7 @@ function state() {
     voice: { language: store.data.preferences.voice?.language || 'en', available: speech.available() },
     local: { engine: engine.status(), downloads: downloads.list(), models: library.list() },
     desktop: { version: VERSION, packaged: app.isPackaged, openAtLogin: app.isPackaged && app.getLoginItemSettings().openAtLogin, shortcut: store.data.preferences.shortcut ?? desktop.DEFAULT_SHORTCUT, shortcutError, notify: store.data.preferences.notify !== false, update },
-    modes, mcpStatus: mcp.statuses(), running: Object.keys(runner.live()), warning: store.warning || secrets.warning, secretsAvailable: secrets.available()
+    modes, mcpStatus: mcp.statuses(), running: Object.keys(runner.live()), background: runner.backgroundTasks(), warning: store.warning || secrets.warning, secretsAvailable: secrets.available()
   };
 }
 
@@ -224,6 +224,7 @@ const handlers = {
   },
   'workspace:remove': async id => {
     if (store.data.threads.some(t => t.workspaceId === id && runner.runs.has(t.id))) throw new Error('Stop running conversations first.');
+    if (store.data.threads.some(t => t.workspaceId === id && runner.tasks.has(t.id))) throw new Error('Stop the background tasks of its conversations first.');
     const workspace = store.workspace(id);
     if (workspace.kind === 'chats') throw new Error('The Chats list cannot be removed.');
     const threadIds = store.data.threads.filter(t => t.workspaceId === id).map(t => t.id);
@@ -285,12 +286,13 @@ const handlers = {
     changed(); send('thread-changed', { threadId: id });
   },
   'thread:rename': (id, title) => { store.update(id, { title: String(title).trim().slice(0, 100) || 'Conversation' }); changed(); },
-  'thread:delete': id => { if (runner.runs.has(id)) throw new Error('Stop the reply first.'); store.removeThread(id); files.remove(id).catch(() => {}); changed(); },
+  'thread:delete': id => { if (runner.runs.has(id)) throw new Error('Stop the reply first.'); runner.endBackground(id); store.removeThread(id); files.remove(id).catch(() => {}); changed(); },
   'thread:rewind': async (id, messageId, options) => { const result = await runner.rewind(id, messageId, options); changed(); send('thread-changed', { threadId: id }); if (options?.code) send('git-changed', store.thread(id).workspaceId); return result; },
   'thread:fork': (id, messageId) => { const branch = store.fork(id, messageId); changed(); return branch.id; },
   'thread:settings': (id, next) => { runner.setThreadSettings(id, next); changed(); send('thread-changed', { threadId: id }); },
   'run:send': (id, message) => runner.start(id, message),
   'run:stop': id => runner.stop(id),
+  'run:stop-task': (id, taskId) => runner.stopTask(id, taskId),
   'run:approve': (approvalId, decision) => runner.answer(approvalId, decision),
   'run:answer': (questionId, answers) => runner.answer(questionId, answers),
   'models:list': id => runner.models(id),
@@ -552,4 +554,16 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('will-quit', () => globalShortcut.unregisterAll());
-app.on('before-quit', () => { terminal?.closeAll(); speech?.cancel(); engine?.close(); runner?.stopAll(); mcp?.closeAll(); store?.flush(); });
+// Quitting ends the Claude Code processes that wait for background tasks, and the tasks with them, so Orin asks first.
+let quitConfirmed = false;
+app.on('before-quit', event => {
+  const waiting = runner ? Object.values(runner.backgroundTasks()) : [];
+  if (waiting.length && !quitConfirmed) {
+    const count = waiting.reduce((n, list) => n + list.length, 0);
+    const options = { type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1, message: `${count === 1 ? 'A background task is' : `${count} background tasks are`} still running.`,
+      detail: 'Quitting Orin stops them, and their results do not reach the conversation.' };
+    const win = BrowserWindow.getFocusedWindow();
+    if ((win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options)) !== 0) { event.preventDefault(); return; }
+    quitConfirmed = true;
+  }
+  terminal?.closeAll(); speech?.cancel(); engine?.close(); runner?.stopAll(); mcp?.closeAll(); store?.flush(); });

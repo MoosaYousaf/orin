@@ -8,6 +8,7 @@ const codexServer = require('./codex-server');
 const copilotAcp = require('./copilot-acp');
 const usage = require('./usage');
 const { Draft } = require('../draft');
+const { ClaudeSession } = require('./claude-session');
 
 // Apps opened from Finder get a minimal PATH, so look where CLIs and npx are usually installed.
 function searchPath() {
@@ -152,9 +153,6 @@ function login(cli, { signal } = {}) {
   });
 }
 
-const DECLINED = 'The user declined this tool call.';
-const NOT_ASKED = 'This access mode does not allow actions that need approval. The user can choose Ask first to approve them.';
-const SKIPPED = 'The user skipped the questions.';
 
 // Codex and Copilot do not stream context usage; their session files have it after the turn.
 async function run(options) {
@@ -164,79 +162,75 @@ async function run(options) {
   return result;
 }
 
-// How long a turn waits for the output pipes after the CLI exits, and for the CLI to exit after its result.
+// How long a turn waits for the output pipes after the CLI exits.
 const EXIT_GRACE_MS = 400;
-const RESULT_GRACE_MS = 3000;
 
-function runTurn({ preset, thread, history, prompt, system, cwd, mcpServers, draft, signal, onSession, approve, question, onSuggestion }) {
+// Claude Code runs in a ClaudeSession that can outlive the turn; see claude-session.js.
+const sessions = new Map(); // thread id -> ClaudeSession
+
+async function claudeTurn({ preset, thread, input, resume, system, cwd, env, executable, mcpServers, draft, signal, onSession, approve, question, background }) {
+  const key = JSON.stringify([thread.model || '', thread.effort || '', thread.mode, cwd, system || '', mcpServers || []]);
+  let session = thread.id ? sessions.get(thread.id) : null;
+  // A wake-up turn that began while this message was being prepared ends first; its reply is saved before this one.
+  while (session?.busy) {
+    await session.turnEnded();
+    if (signal.aborted) return { stopped: true };
+    session = sessions.get(thread.id);
+  }
+  // The same process takes the next message while it is open, with the same settings and session. While its tasks run,
+  // it is kept even when the connector config changed (a refreshed token): the runner blocks setting changes then.
+  const reusable = session?.open && !thread.replay && session.sessionId && session.sessionId === resume && (session.key === key || session.tasks.length > 0);
+  if (session && !reusable) {
+    if (session.open && session.tasks.length) throw new Error('Background tasks are running in this conversation. Stop them first.');
+    session.closeInput(); session.kill();
+    session = null;
+  }
+  if (!session) {
+    let configDir, mcpConfig;
+    if (mcpServers?.length) {
+      configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orin-mcp-'));
+      mcpConfig = path.join(configDir, 'config.json');
+      fs.writeFileSync(mcpConfig, JSON.stringify(claudeMcpConfig(mcpServers)), { mode: 0o600 });
+    }
+    const cleanup = () => { if (configDir) fs.rmSync(configDir, { recursive: true, force: true }); };
+    let child;
+    try { child = track(spawn(executable, command('claude', { ...thread, sessionId: resume, mcpConfig, system }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })); }
+    catch (error) { cleanup(); throw error; }
+    const id = thread.id;
+    session = new ClaudeSession({
+      child, key, sessionId: resume, name: preset.name, cleanup,
+      hooks: { ...background, onClose: s => { if (id && sessions.get(id) === s) sessions.delete(id); background?.onClose?.(s); } },
+      apply: (event, d) => apply('claude', event, d),
+      fail: error => (signedOut('claude', error.message) && !error.signIn ? signInError(preset.name) : error)
+    });
+    if (id) sessions.set(id, session);
+  }
+  return session.send(input, { draft, signal, mode: thread.mode, approve, question, onSession });
+}
+// The background tasks of a conversation's open Claude Code process, and actions on them.
+function background(threadId) {
+  const session = sessions.get(threadId);
+  return session?.alive ? { tasks: session.tasks, busy: session.busy, stopTask: id => session.stopTask(id), end: () => { session.closeInput(); session.kill(); } } : null;
+}
+
+function runTurn({ preset, thread, history, prompt, system, cwd, mcpServers, draft, signal, onSession, approve, question, background: hooks }) {
   const executable = cliPath(preset.cli);
   if (!executable) throw new Error(`${preset.name} is not installed or not on PATH.`);
   let resume = thread.replay ? null : thread.sessionId;
   const input = thread.replay || (!thread.sessionId && history.length) ? replayPrompt(history, prompt) : prompt;
   const env = { ...process.env, PATH: searchPath().join(path.delimiter), NO_COLOR: '1', COPILOT_AUTO_UPDATE: 'false' };
-  // Suggestions are a separate, optional Haiku request with a short context.
+  if (preset.cli === 'claude') return claudeTurn({ preset, thread, input, resume, system, cwd, env, executable, mcpServers, draft, signal, onSession, approve, question, background: hooks });
   if (preset.cli === 'codex' && thread.mode === 'ask') return codexServer.run({ executable, env, cwd, input, resume, model: thread.model, effort: thread.effort, draft, signal, onSession, approve, question });
   if (preset.cli === 'copilot' && thread.mode === 'ask') return copilotAcp.run({ executable, env, cwd, input, resume, model: thread.model, effort: thread.effort, draft, signal, onSession, approve });
   if (preset.cli === 'copilot' && !resume) { resume = crypto.randomUUID(); onSession(resume); }
-  let configDir, mcpConfig;
-  if (preset.cli === 'claude' && mcpServers?.length) {
-    configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orin-mcp-'));
-    mcpConfig = path.join(configDir, 'config.json');
-    fs.writeFileSync(mcpConfig, JSON.stringify(claudeMcpConfig(mcpServers)), { mode: 0o600 });
-  }
-  const args = command(preset.cli, { ...thread, sessionId: resume, mcpConfig, system });
-  let child;
-  try { child = track(spawn(executable, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })); }
-  catch (error) { if (configDir) fs.rmSync(configDir, { recursive: true, force: true }); throw error; }
-  const cleanupConfig = () => { if (configDir) fs.rmSync(configDir, { recursive: true, force: true }); };
-  child.once('close', cleanupConfig); child.once('error', cleanupConfig);
-  // Claude Code keeps stdin open for approval and question answers until the turn's result arrives.
-  const asks = preset.cli === 'claude';
+  const child = track(spawn(executable, command(preset.cli, { ...thread, sessionId: resume, system }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }));
   child.stdin.on('error', () => {});
-  if (asks) child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: input } }) + '\n');
-  else child.stdin.end(input);
-  const reply = (request_id, response) => { if (child.stdin.writable) child.stdin.write(JSON.stringify({ type: 'control_response', response: { request_id, ...response } }) + '\n'); };
-  const asking = new Map(); // request_id -> cancel
-  const control = event => {
-    if (event.type === 'control_cancel_request') { asking.get(event.request_id)?.(); asking.delete(event.request_id); return; }
-    const { request_id, request = {} } = event;
-    if (request.subtype !== 'can_use_tool') { reply(request_id, { subtype: 'error', error: `Orin does not handle ${request.subtype} requests.` }); return; }
-    const callId = request.tool_use_id;
-    const allow = updatedInput => reply(request_id, { subtype: 'success', response: { behavior: 'allow', updatedInput } });
-    const deny = message => reply(request_id, { subtype: 'success', response: { behavior: 'deny', message } });
-    draft.tool({ id: callId, name: request.tool_name, input: request.input });
-    // AskUserQuestion takes its answers in updatedInput.answers, keyed by question text.
-    if (request.tool_name === 'AskUserQuestion' && question) {
-      const questions = request.input?.questions || [];
-      draft.setStatus(callId, 'pending');
-      const { decision, cancel } = question({ callId, questions: questions.map((q, i) => ({ ...q, id: String(i) })) });
-      asking.set(request_id, cancel);
-      decision.then(answers => {
-        asking.delete(request_id);
-        draft.setStatus(callId, answers ? 'running' : 'denied');
-        if (answers) allow({ ...request.input, answers: Object.fromEntries(questions.map((q, i) => [q.question, answers[String(i)].join(', ')])) });
-        else deny(SKIPPED);
-      });
-      return;
-    }
-    if (!approve || thread.mode !== 'ask') { draft.setStatus(callId, 'denied'); deny(NOT_ASKED); return; }
-    draft.setStatus(callId, 'pending');
-    const { decision, cancel } = approve({ callId, name: request.tool_name, tool: request.display_name || request.tool_name, input: request.input, description: request.description, blockedPath: request.blocked_path });
-    asking.set(request_id, cancel);
-    decision.then(answer => {
-      asking.delete(request_id);
-      draft.setStatus(callId, answer === 'deny' ? 'denied' : 'running');
-      if (answer === 'deny') deny(DECLINED); else allow(request.input);
-    });
-  };
-  let pending = '', stderr = '', failure = null, timer = null, ended = () => {};
+  child.stdin.end(input);
+  let pending = '', stderr = '', failure = null;
   const handle = line => {
     if (!line.trim()) return;
     let event;
     try { event = JSON.parse(line); } catch { if (!signal.aborted) draft.write('text', line + '\n'); return; }
-    if (event.type === 'control_request' || event.type === 'control_cancel_request') { control(event); return; }
-    if (asks && event.type === 'result') child.stdin.end();
-    if (event.type === 'result') ended();
     try { const session = apply(preset.cli, event, draft); if (session) onSession(session); }
     catch (error) { failure ||= error; }
   };
@@ -256,10 +250,9 @@ function runTurn({ preset, thread, history, prompt, system, cwd, mcpServers, dra
   signal.addEventListener('abort', stop, { once: true });
   if (signal.aborted) stop();
   // 'close' waits for every holder of the output pipes. A background process that the agent started (a dev server,
-  // `npm start`) inherits them, so the turn also ends shortly after the CLI exits, or a little after its result
-  // event when the CLI stays open for its own background work. Orin leaves such processes running.
+  // `npm start`) inherits them, so the turn also ends shortly after the CLI exits. Orin leaves such processes running.
   return new Promise((resolve, reject) => {
-    let done = false;
+    let done = false, timer = null;
     const finish = (code, killedBy) => {
       if (done) return;
       done = true;
@@ -268,20 +261,14 @@ function runTurn({ preset, thread, history, prompt, system, cwd, mcpServers, dra
       handle(pending); pending = '';
       child.stdout.removeAllListeners('data'); child.stderr.removeAllListeners('data');
       child.stderr.destroy(); child.unref();
-      for (const cancel of asking.values()) cancel();
-      asking.clear();
       child.stdout.destroy();
-      if (exitCode === null) stop();
-      cleanupConfig();
       if (signal.aborted) resolve({ stopped: true });
       else if (failure) reject(signedOut(preset.cli, failure.message) && !failure.signIn ? signInError(preset.name) : failure);
       else if (code === 0) resolve({});
       else reject(signedOut(preset.cli, stderr) ? signInError(preset.name) : new Error(stderr.trim() || `${preset.name} exited with ${killedBy || `code ${code}`}.`));
     };
-    let exitCode = null;
-    ended = () => { if (!timer) timer = setTimeout(() => finish(0), RESULT_GRACE_MS); };
     child.on('error', reject);
-    child.on('exit', (code, killedBy) => { exitCode = code ?? killedBy; clearTimeout(timer); timer = setTimeout(() => finish(code, killedBy), EXIT_GRACE_MS); });
+    child.on('exit', (code, killedBy) => { timer = setTimeout(() => finish(code, killedBy), EXIT_GRACE_MS); });
     child.on('close', finish);
   });
 }
@@ -322,6 +309,6 @@ function complete({ preset, model = '', prompt, signal }) {
 
 const children = new Set();
 function track(child) { children.add(child); child.once('exit', () => children.delete(child)); child.once('error', () => children.delete(child)); return child; }
-function closeAll() { for (const child of children) child.kill('SIGKILL'); children.clear(); }
+function closeAll() { for (const child of children) child.kill('SIGKILL'); children.clear(); sessions.clear(); }
 
-module.exports = { closeAll, claudeMcpConfig, searchPath, cliPath, command, apply, run, complete, completeArgs, login, signedOut, LOGIN };
+module.exports = { closeAll, background, claudeMcpConfig, searchPath, cliPath, command, apply, run, complete, completeArgs, login, signedOut, LOGIN };
