@@ -203,7 +203,11 @@ class Downloads {
         yield chunk;
       }
     }
-    await pipeline(Readable.fromWeb(response.body), checked, fs.createWriteStream(partFile, { flags: resumed ? 'a' : 'w' }), { signal: job.controller.signal });
+    // A failed pipeline can return before the file stream has opened. Its late open with 'w' would then empty a file
+    // that the next attempt already uses, so the call ends only after the stream has closed.
+    const out = fs.createWriteStream(partFile, { flags: resumed ? 'a' : 'w' });
+    try { await pipeline(Readable.fromWeb(response.body), checked, out, { signal: job.controller.signal }); }
+    finally { if (!out.closed) await new Promise(resolve => out.once('close', resolve)); }
     if (done !== part.size) throw new Error(`${path.basename(part.path)} arrived incomplete (${done} of ${part.size} bytes). Try again to resume.`);
     if (part.sha256 && hash.digest('hex') !== part.sha256) { fs.rmSync(partFile, { force: true }); throw new Error(`${path.basename(part.path)} failed its SHA-256 check and was deleted. Try again.`); }
   }

@@ -105,6 +105,21 @@ test('review: automatic Git checkpoints do not execute clean or smudge filters',
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('review: a failed download returns only after its file is closed, so a late open cannot empty the next attempt', async () => {
+  const root = tmp(), library = new hf.Library({ root }), open = fs.open;
+  // A busy machine opens files late; without the wait, the late open with 'w' empties the file written below.
+  fs.open = (...args) => setTimeout(() => open(...args), 100);
+  try {
+    const dir = library.dirOf('acme/model'); fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'tiny.gguf.part');
+    const downloads = new hf.Downloads({ library, fetch: async () => new Response('too many bytes') });
+    await assert.rejects(downloads.fetchPart({ repo: 'acme/model', controller: new AbortController() }, { path: 'tiny.gguf', size: 4 }, file, 0), /exceeded/);
+    fs.writeFileSync(file, 'a');
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(fs.readFileSync(file, 'utf8'), 'a');
+  } finally { fs.open = open; fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('review: downloads reject oversized bodies and invalid ranges and remove split models', async () => {
   const root = tmp(), library = new hf.Library({ root });
   try {

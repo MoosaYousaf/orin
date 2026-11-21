@@ -12,6 +12,20 @@ function replySaved(data, config) {
     && last.parts?.some(p => p.type === 'text' && p.text.includes(config.marker));
 }
 
+// Only the newest backup stays: each update makes one, and each is about 360 MB.
+// Runs after a successful install, so the backup that was just made is the one kept.
+function pruneBackups(keep) {
+  const dir = path.dirname(keep);
+  const removed = [];
+  for (const name of fs.readdirSync(dir)) {
+    const file = path.join(dir, name);
+    if (!/^\.orin-previous-[0-9a-f-]+\.app$/.test(name) || file === keep) continue;
+    fs.rmSync(file, { recursive: true, force: true });
+    removed.push(file);
+  }
+  return removed;
+}
+
 async function finish(config) {
   const run = (command, args) => execFileSync(command, args, { stdio: 'inherit', timeout: 120000 });
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -50,6 +64,7 @@ async function finish(config) {
     if (!running()) throw new Error('The updated app stopped immediately after launch.');
     // Keep the previous copy for recovery; it is hidden from Finder and Spotlight.
     log(`Installation complete. Updated Orin is running at ${config.installed}. Previous app: ${backedUp ? config.backup : 'none'}`);
+    if (backedUp) for (const file of pruneBackups(config.backup)) log(`Removed older backup ${file}`);
   } catch (error) {
     // Restore only when no app is running, so rollback cannot interrupt a session.
     if (!running()) {
@@ -60,7 +75,7 @@ async function finish(config) {
   }
 }
 
-module.exports = { replySaved };
+module.exports = { replySaved, pruneBackups };
 if (require.main === module) {
   const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const unload = () => {
