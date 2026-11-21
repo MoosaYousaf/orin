@@ -17,6 +17,7 @@ const codexServer = require('./providers/codex-server');
 
 const UPDATE_MS = 60;
 const LOCAL_ID = 'orin-local';
+const FILE_OUTPUT = 'When the user asks you to create, split, edit, or convert scripts, indicators, documents, or other deliverable files, return each complete file in this reply without waiting for a separate download request. Preserve the appropriate extension (Pine Script uses .pine). Use a separate fenced code block for each text file, with its language and file name in the fence info, for example ```pinescript KeyLevels.pine. Orin displays these blocks as downloadable file cards. Include the complete contents, not placeholders or diffs, unless the user asks for an excerpt or patch. Short illustrative examples can stay inline.';
 
 const SKIPPED = 'The user skipped the questions. Continue with your best judgment, or ask in plain text.';
 // API and local models get this tool next to the MCP tools, so any model can ask structured questions.
@@ -32,7 +33,7 @@ const ASK_TOOL = {
 // API and local models make files with this tool. The user gets a file card with Preview, Open, and Save.
 const WRITE_TOOL = {
   qualified: 'orin__write_file', server: 'Orin', name: 'write_file',
-  description: 'Create a file for the user to preview, open, and download, such as a report, a table, or a document. The extension sets the format. Text formats (.txt, .md, .csv, .json, .py, .svg, and others) take the file text. Rich formats (.docx, .pdf, .rtf, .odt, .html) take HTML body content: headings, paragraphs, lists, tables, and inline styles. Returns the saved file name.',
+  description: 'Create a downloadable file for the user. Use this proactively for requested deliverables, including separate scripts when splitting an indicator. Text source and config files accept any text extension, including .pine (Pine Script), .py, .js, .csv, .json, .svg, and extensionless names such as Dockerfile. Supply complete file contents. Rich formats (.docx, .pdf, .rtf, .odt, .html) take HTML body content. Binary formats such as ZIP and XLSX cannot be made from text. Returns the saved file name. Do not also repeat the file contents in a code block.',
   inputSchema: { type: 'object', required: ['name', 'content'], properties: { name: { type: 'string', description: 'File name with extension, for example report.docx or data.csv.' }, content: { type: 'string' } } }
 };
 
@@ -236,7 +237,10 @@ class Runner {
       const attachments = this.files ? await this.files.promptTexts(preset.kind === 'cli' ? [{ parts: attached }] : messages) : new Map();
       let result, saved;
       if (preset.kind === 'cli') {
-        result = await cli.run({ ...common, preset, history, prompt: [attachmentBlock(attached, attachments, { paths: true }), text].filter(Boolean).join('\n\n'), cwd: workspace.path, mcpServers: this.mcp.enabledConfigs(),
+        // Claude Code takes Orin's instructions as a system prompt; other CLIs have no such option, so they go in the prompt.
+        const claude = preset.cli === 'claude';
+        result = await cli.run({ ...common, preset, history, prompt: [claude ? '' : FILE_OUTPUT, attachmentBlock(attached, attachments, { paths: true }), text].filter(Boolean).join('\n\n'), system: claude ? FILE_OUTPUT : '', cwd: workspace.path,
+          mcpServers: claude ? await this.mcp.claudeConfigs(this.connectorSignIn(threadId, draft)) : this.mcp.enabledConfigs(),
           onSession: id => { if (id !== thread.sessionId) this.store.update(threadId, { sessionId: id, replay: false }); },
           approve: request => this.ask(threadId, { server: preset.name, ...request }),
           question: request => this.question(threadId, { server: preset.name, ...request }) });
@@ -244,8 +248,8 @@ class Runner {
         // A small local model misuses Orin's own tools (a 0.5B model asked about 50 junk questions in a row), and their
         // text costs about 1,600 tokens of prompt on every first turn. Local models get only the connectors the user added.
         const local = connection.id === LOCAL_ID;
-        const tools = [...await this.mcp.tools(), ...(local ? [] : [ASK_TOOL, ...(this.files ? [WRITE_TOOL] : [])])];
-        const system = [this.store.data.preferences.systemPrompt, workspace.kind === 'project' ? await projects.apiContext(workspace) : ''].filter(Boolean).join('\n\n');
+        const tools = [...await this.mcp.tools(this.connectorSignIn(threadId, draft)), ...(local ? [] : [ASK_TOOL, ...(this.files ? [WRITE_TOOL] : [])])];
+        const system = [FILE_OUTPUT, !local && this.files ? 'Prefer orin__write_file for deliverables; after creating a file, briefly describe it without repeating its contents in a code block.' : '', this.store.data.preferences.systemPrompt, workspace.kind === 'project' ? await projects.apiContext(workspace) : ''].filter(Boolean).join('\n\n');
         const api = { ...common, attachments, apiKey: this.secrets.get(`key:${connection.id}`), system: system || undefined, tools, callTool: this.toolCaller(threadId, tools, draft) };
         // A downloaded model needs the engine running with it. The thinking text shows while it loads into memory.
         const baseURL = local ? await this.local.engine.use(thread.model, { signal: controller.signal, onStatus: text => draft.write('thinking', `${text}\n`) }) : connection.baseURL || preset.baseURL;
@@ -260,7 +264,8 @@ class Runner {
     } catch (error) {
       // A user stop is not a failure: keep whatever arrived and mark it stopped.
       if (controller.signal.aborted) finish(draft.parts.length ? { parts: draft.final(), stopped: true } : null);
-      else finish({ parts: draft.final(), error: error.message || String(error) });
+      // A signed-out CLI gets a Sign in button on the error; after the sign-in the renderer sends the message again.
+      else finish({ parts: draft.final(), error: error.message || String(error), ...(preset.kind === 'cli' && cli.LOGIN[preset.cli] && (error.signIn || cli.signedOut(preset.cli, error.message)) ? { signIn: connection.id } : {}) });
     }
   }
   // One extra request (Haiku on Claude, else the same model); CLIs run once without a session or tools. A failure only means no suggestions.
@@ -312,6 +317,14 @@ class Runner {
     cli.closeAll();
   }
 
+  // A connector that needs a browser sign-in asks in the chat. Sign in opens the page and the turn waits;
+  // Skip, a failed sign-in, or a connector that is down only leaves that connector out of this turn.
+  connectorSignIn(threadId, draft) {
+    return {
+      signIn: server => this.ask(threadId, { kind: 'sign-in', server: server.name, name: 'sign-in', tool: 'Sign in', input: server.url }).decision.then(answer => answer !== 'deny'),
+      onSkip: (server, reason) => draft.write('thinking', `${server.name} is not connected (${reason}). This reply runs without it.\n`)
+    };
+  }
   // Each MCP call asks the user first unless the thread allows all tools.
   toolCaller(threadId, tools, draft) {
     const byName = new Map(tools.map(t => [t.qualified, t]));

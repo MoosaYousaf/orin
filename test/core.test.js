@@ -53,7 +53,7 @@ test('CLI prompts never enter argv, so a prompt cannot act as an option', () => 
     assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'), cli);
   }
   assert.deepEqual(command('codex', { sessionId: 's', model: 'gpt-6.1-sol', effort: 'high', mode: 'auto' }),
-    ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="high"', 'resume', 's', '-']);
+    ['--search', 'exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="high"', 'resume', 's', '-']);
   assert.ok(command('claude', { mode: 'full' }).includes('bypassPermissions'));
   const mcp = command('claude', { mode: 'auto', mcpConfig: '/tmp/private-config.json' });
   assert.equal(mcp[mcp.indexOf('--mcp-config') + 1], '/tmp/private-config.json');

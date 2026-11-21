@@ -1,17 +1,18 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, safeStorage, nativeTheme, clipboard, nativeImage, Notification, globalShortcut, screen, session, systemPreferences } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { isUtf8 } = require('node:buffer');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const { Store } = require('./store');
 const { Secrets } = require('./secrets');
-const { Mcp } = require('./mcp');
+const { Mcp, serverUrl } = require('./mcp');
 const { Runner, mapMode } = require('./runner');
 const { presets, modes } = require('./providers/catalog');
 const projects = require('./projects');
 
-const { cliPath, searchPath: cliSearchPath } = require('./providers/cli');
+const { cliPath, searchPath: cliSearchPath, login: cliLogin } = require('./providers/cli');
 const git = require('./git');
 const github = require('./github');
 const { Files, safeName, mediaType } = require('./files');
@@ -147,10 +148,9 @@ function mcpRecord(input, existing = {}) {
   const transport = input.transport === 'http' ? 'http' : 'stdio';
   if (transport === 'stdio' && !String(input.command || '').trim()) throw new Error('Enter the command that starts the server.');
   if (transport === 'http' && !/^https?:\/\//.test(String(input.url || ''))) throw new Error('Enter an http or https URL.');
-  return { id: existing.id || crypto.randomUUID(), name, transport, command: String(input.command || '').trim(), args: (input.args || []).map(a => String(a).replace(/^~(?=\/|$)/, os.homedir())), url: String(input.url || '').trim(), oauth: transport === 'http' && !!input.oauth, enabled: input.enabled ?? existing.enabled ?? !(transport === 'http' && input.oauth) };
+  return { id: existing.id || crypto.randomUUID(), name, transport, command: String(input.command || '').trim(), args: (input.args || []).map(a => String(a).replace(/^~(?=\/|$)/, os.homedir())), url: serverUrl(String(input.url || '').trim()), oauth: transport === 'http' && !!input.oauth, enabled: input.enabled ?? existing.enabled ?? !(transport === 'http' && input.oauth) };
 }
 
-const TEXT_COPY = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|xml|svg|html?|css|js|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sh|sql|ini|cfg|log|tex|rst|org)$/i;
 // The window for dialogs and Quick Look; a click can arrive while no window has focus.
 const activeWindow = () => BrowserWindow.getFocusedWindow() || [...windows].find(w => !w.isDestroyed());
 const threadFile = (threadId, file) => { const thread = store.thread(threadId); return files.resolve(thread.id, store.workspace(thread.workspaceId).path, file); };
@@ -333,6 +333,12 @@ const handlers = {
     changed(); return record.id;
   },
   'mcp:remove': async id => { await mcp.disconnect(id); store.remove('mcpServers', id); secrets.set(`mcp:${id}`, null); secrets.set(`mcp-oauth:${id}`, null); changed(); },
+  // The CLI's own browser sign-in, from the Sign in button on a signed-out reply. The CLI opens the browser.
+  'cli:sign-in': async connectionId => {
+    const { preset } = runner.resolve(connectionId);
+    if (preset.kind !== 'cli') throw new Error('Only CLI connections sign in here.');
+    await cliLogin(preset.cli, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+  },
   // Connect turns the connector on and connects; OAuth connectors open the provider's consent page.
   'mcp:connect': async id => {
     const server = store.data.mcpServers.find(s => s.id === id);
@@ -393,6 +399,7 @@ const handlers = {
   },
   'files:attach': (threadId, paths) => files.attach(store.thread(threadId).id, (Array.isArray(paths) ? paths : []).filter(p => typeof p === 'string' && path.isAbsolute(p))),
   'files:attach-data': (threadId, file) => files.attachData(store.thread(threadId).id, file || {}),
+  'files:snippet': (threadId, name, text) => files.write(store.thread(threadId).id, name, String(text ?? ''), { raw: true }),
   'files:info': async (threadId, list) => {
     const thread = store.thread(threadId), root = store.workspace(thread.workspaceId).path;
     return Promise.all((Array.isArray(list) ? list : []).slice(0, 50).map(file => files.resolve(thread.id, root, file).then(full => files.part(full), () => null)));
@@ -418,16 +425,19 @@ const handlers = {
   'files:copy': async (threadId, file) => {
     const full = await threadFile(threadId, file);
     if (/^image\/(png|jpeg|gif|webp)$/.test(mediaType(full))) return clipboard.writeImage(nativeImage.createFromPath(full));
-    if (TEXT_COPY.test(full) && fs.statSync(full).size < 2 * 1024 * 1024) return clipboard.writeText(fs.readFileSync(full, 'utf8'));
+    if (fs.statSync(full).size < 2 * 1024 * 1024) {
+      const bytes = fs.readFileSync(full);
+      if (!bytes.includes(0) && isUtf8(bytes)) return clipboard.writeText(bytes.toString('utf8'));
+    }
     const xml = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
     clipboard.clear();
     clipboard.writeBuffer('NSFilenamesPboardType', Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><array><string>${xml(full)}</string></array></plist>`));
   },
   // Saves text the renderer has (a code snippet or a whole reply) as a file. format: text, html, docx, rtf, odt, or pdf.
-  'files:export': async ({ name, text = '', html = '' }) => {
+  'files:export': async ({ name, text = '', html = '', raw = false }) => {
     const target = await dialog.showSaveDialog(activeWindow(), { defaultPath: path.join(app.getPath('downloads'), safeName(name)) });
     if (target.canceled || !target.filePath) return null;
-    await files.render(target.filePath, /\.(docx|rtf|odt|pdf|html?)$/i.test(target.filePath) && html ? html : text);
+    await files.render(target.filePath, !raw && /\.(docx|rtf|odt|pdf|html?)$/i.test(target.filePath) && html ? html : text, { raw });
     return target.filePath;
   },
   // The renderer has no clipboard permission (see the permission check handler), so text copies go through main.

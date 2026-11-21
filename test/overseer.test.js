@@ -97,7 +97,7 @@ test('overseer: a turn routes through the router model, runs on the chosen model
     const workspace = store.addWorkspace(fs.mkdtempSync(path.join(os.tmpdir(), 'orin-overseer-ws-')));
     const thread = store.addThread(workspace.id, { connectionId: 'claude-code', model: 'claude-opus-5-5', effort: '', mode: 'auto' });
     let done;
-    const runner = new Runner({ store, secrets: { get: () => null, has: () => false }, mcp: { enabledConfigs: () => [] }, send: (c, v) => { if (c === 'run-state' && !v.running) done(v); } });
+    const runner = new Runner({ store, secrets: { get: () => null, has: () => false }, mcp: { enabledConfigs: () => [], claudeConfigs: async () => [] }, send: (c, v) => { if (c === 'run-state' && !v.running) done(v); } });
     store.data.preferences.overseer = { include: ['claude-code::claude-opus-5-5', 'claude-code::claude-sonnet-5-5', 'claude-code::claude-haiku-5-5'] };
     runner.setThreadSettings(thread.id, { overseer: true });
     assert.equal(store.thread(thread.id).overseer, true);

@@ -27,24 +27,24 @@ function UsageRing({ thread, preset }) {
   const cli = preset?.cli || null;
   const limits = useLimits(thread.connectionId, cli);
   const usage = thread.messages.findLast(m => m.role === 'assistant' && m.usage)?.usage;
-  const contextShare = usage?.window ? Math.min(1, usage.used / usage.window) : 0;
+  const contextShare = usage?.window ? Math.max(0, Math.min(1, usage.used / usage.window)) : 0;
   const context = !usage ? 'Context: shows after the first reply.'
     : usage.window ? `Context: ${tokens(usage.used)} of ${tokens(usage.window)} tokens (${Math.round(contextShare * 100)}%)`
     : `Context: ${tokens(usage.used)} tokens. This model does not report its context size.`;
   const windows = limits?.windows || [];
   const session = windows[0];
-  const share = session ? session.used / 100 : contextShare;
+  const share = session ? Math.max(0, Math.min(1, session.used / 100)) : contextShare;
   const tone = level(windows.length ? Math.max(...windows.map(w => w.used)) : contextShare * 100);
   const nearest = windows.filter(w => w.used >= WARN).sort((a, b) => b.used - a.used)[0];
   const label = session ? `${session.label}: ${session.used}% used, ${leftText(session)}` : context;
-  const r = 6.5, length = 2 * Math.PI * r;
+  const r = 6.5;
   return (
     <>
       {nearest ? <span className={`limit-warn ${level(nearest.used)}`}>{nearest.label.replace(/ \(.*\)$/, '')}: {leftText(nearest)}</span> : null}
       <span className={`usage-ring ${tone}`} aria-label={label} role="img" tabIndex={0} onMouseEnter={() => cli && refreshLimits(thread.connectionId, cli)}>
         <svg width="18" height="18" viewBox="0 0 18 18">
           <circle cx="9" cy="9" r={r} className="usage-track" />
-          {share ? <circle cx="9" cy="9" r={r} className="usage-fill" strokeDasharray={`${share * length} ${length}`} transform="rotate(-90 9 9)" /> : null}
+          {share > 0 ? <circle cx="9" cy="9" r={r} className="usage-fill" pathLength="100" strokeDasharray={`${share * 100} ${100 - share * 100}`} transform="rotate(-90 9 9)" /> : null}
         </svg>
         <span className="usage-card" role="tooltip">
           {limits?.plan ? <span className="usage-plan">{limits.plan}</span> : cli && !limits ? <span className="usage-misc">Reading plan usage…</span> : null}

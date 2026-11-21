@@ -8,6 +8,8 @@ process.env.ORIN_USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'orin-smoke-'
 const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orin-project-')));
 const now = Date.now();
 const text = t => ({ type: 'text', text: t });
+const pineSource = '//@version=6\nindicator("Key Levels")\nplot(close)';
+const sessionsSource = '//@version=6\nindicator("Sessions")\nplot(open)';
 // A file part whose file exists in the thread's folder, the way files:attach and write_file leave it.
 const fileSeed = (kind, name, body) => {
   const dir = path.join(process.env.ORIN_USER_DATA, 'Files', 't2', kind);
@@ -30,7 +32,7 @@ fs.writeFileSync(path.join(process.env.ORIN_USER_DATA, 'orin-data.json'), JSON.s
     { id: 'm4', at: now, role: 'assistant', connectionId: 'claude-code', model: 'claude-opus-5-5', parts: [
       { type: 'tool', id: 'w', name: 'Write', input: { file_path: path.join(folder, 'report.md'), content: '# Report' }, output: 'File created', status: 'done' },
       fileSeed('out', 'totals.csv', 'region,total\nNorth,12\n'),
-      text('# Quarterly totals\n\n```csv totals.csv\nregion,total\nNorth,12\nSouth,9\n```\n\n```python\nprint("done")\n```\n\n```html\n<p id="out">waiting</p><script>document.getElementById("out").textContent = "ran " + (typeof require) + " " + (typeof window.orin)</script>\n```\n\n```mermaid\nflowchart LR\n  Plan --> Build --> Ship\n```')] }
+      text('# Quarterly totals\n\n```csv totals.csv\nregion,total\nNorth,12\nSouth,9\n```\n\n```python\nprint("done")\n```\n\n```html\n<p id="out">waiting</p><script>document.getElementById("out").textContent = "ran " + (typeof require) + " " + (typeof window.orin)</script>\n```\n\n```mermaid\nflowchart LR\n  Plan --> Build --> Ship\n```\n\n```pinescript KeyLevels.pine\n' + pineSource + '\n```\n\n```text\n' + sessionsSource + '\n```')] }
   ] }]
 }));
 // The workspace is a Git repository with a GitHub origin. A fake gh answers with one pull request.
@@ -47,7 +49,7 @@ process.env.FAKE_GH_LOG = path.join(ghBin, 'log'); process.env.FAKE_GH_STATE = p
 fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify({ pr: { number: 12, title: 'Parse breaking changes from the changelog', url: 'https://github.com/example/orin/pull/12', state: 'OPEN', isDraft: false, reviewDecision: 'CHANGES_REQUESTED', headRefName: 'feature/parser', baseRefName: 'main', author: { login: 'me' }, updatedAt: '2026-10-29T00:00:00Z' } }));
 // Fixed plan limits: the session window is fine, the week is near its cap.
 const inHours = h => Date.now() + h * 3600 * 1000;
-process.env.ORIN_LIMITS_FIXTURE = JSON.stringify({ claude: { plan: 'Claude Pro', windows: [{ id: 'five_hour', label: 'Session (5 hours)', used: 54, resetsAt: inHours(2) }, { id: 'seven_day', label: 'Week', used: 86, resetsAt: inHours(50) }], note: '' } });
+process.env.ORIN_LIMITS_FIXTURE = JSON.stringify({ claude: { plan: 'Claude Pro', windows: [{ id: 'five_hour', label: 'Session (5 hours)', used: 80, resetsAt: inHours(2) }, { id: 'seven_day', label: 'Week', used: 86, resetsAt: inHours(50) }], note: '' } });
 // A fake speech helper streams words without a microphone.
 process.env.ORIN_SPEECH_HELPER = path.join(__dirname, '../test/fixtures/fake-speech.cjs');
 // The Terminal page runs tmux on its own server, so the user's tmux sessions stay untouched.
@@ -117,7 +119,8 @@ app.whenReady().then(async () => {
     await clickText(win, '.thread-row', 'Parse the release notes');
     await until(win, `document.querySelectorAll('.msg').length === 2 && !!document.querySelector('.prose table')`, 'messages render');
     await until(win, `!!document.querySelector('.top-actions [title="Terminal (tmux)"]') && !['Rename', 'Delete conversation', 'Show folder in Finder'].some(t => document.querySelector(\`.top-actions [title="\${t}"]\`))`, 'the thread header has no rename, delete, or Finder buttons');
-    await until(win, `document.querySelector('.composer-row .usage-ring')?.getAttribute('aria-label') === 'Session (5 hours): 54% used, 46% left'`, 'usage ring shows the plan session');
+    await until(win, `document.querySelector('.composer-row .usage-ring')?.getAttribute('aria-label') === 'Session (5 hours): 80% used, 20% left'`, 'usage ring shows the plan session');
+    await until(win, `(() => { const fill = document.querySelector('.usage-fill'); return fill?.getAttribute('pathLength') === '100' && fill.getAttribute('stroke-dasharray') === '80 20' && getComputedStyle(fill).strokeLinecap === 'butt'; })()`, '80 percent usage fills exactly 80 percent of the circumference');
     await until(win, `(() => { const card = document.querySelector('.usage-card')?.textContent || ''; return card.includes('Claude Pro') && card.includes('Week86% used') && card.includes('14% left') && card.includes('Context: 45.2k of 1M tokens (5%)'); })()`, 'usage card shows windows, what is left, and the context');
     await until(win, `document.querySelector('.composer-row .usage-ring').classList.contains('high') && document.querySelector('.limit-warn')?.textContent === 'Week: 14% left'`, 'a window near its cap warns');
     await until(win, `/near the usage limit/.test(document.querySelector('.toast')?.textContent || '')`, 'a toast warns once near the cap');
@@ -206,8 +209,22 @@ app.whenReady().then(async () => {
     await click(win, '.topbar [title="Changes"]');
     fs.writeFileSync(path.join(folder, 'report.md'), '# Report\n');
     await clickText(win, '.thread-row', 'Quarterly table');
-    await until(win, `[...document.querySelectorAll('.code-lang')].map(e => e.textContent).join() === 'totals.csv,Python,HTML,Mermaid'`, 'code blocks show a file name and a language');
-    await until(win, `[...document.querySelectorAll('.file-card .file-name')].map(e => e.textContent).join() === 'brief.txt,report.md,totals.csv'`, 'file cards for an attachment, a written file, and a made file');
+    await until(win, `[...document.querySelectorAll('.file-card .file-name')].map(e => e.textContent).join() === 'brief.txt,report.md,totals.csv,totals.csv,snippet.py,snippet.html,snippet.mermaid,KeyLevels.pine,Sessions.pine'`, 'existing replies automatically get downloadable cards, including two separate Pine scripts');
+    await until(win, `document.querySelectorAll('.code-block').length === 1`, 'script contents are collapsed; diagrams stay drawn');
+    saveTarget = path.join(ghBin, 'KeyLevels.pine');
+    await click(win, '.file-card[aria-label="KeyLevels.pine"] [aria-label="Download"]');
+    await until(win, `document.querySelector('.toast')?.textContent.includes('KeyLevels.pine')`, 'Pine Script download succeeds');
+    if (fs.readFileSync(saveTarget, 'utf8') !== pineSource) throw new Error('Pine Script download changed the source');
+    await click(win, '.file-card[aria-label="KeyLevels.pine"] [aria-label="Copy"]');
+    await until(win, `document.querySelector('.toast')?.textContent === 'KeyLevels.pine copied to the clipboard'`, 'Pine Script card copies source');
+    if (clipboard.readText() !== pineSource) throw new Error('Pine Script card copied something other than source');
+    saveTarget = path.join(ghBin, 'Sessions.pine');
+    await click(win, '.file-card[aria-label="Sessions.pine"] [aria-label="Download"]');
+    await until(win, `document.querySelector('.toast')?.textContent.includes('Saved to') && document.querySelector('.toast')?.textContent.includes('Sessions.pine')`, 'second Pine Script download succeeds');
+    if (fs.readFileSync(saveTarget, 'utf8') !== sessionsSource) throw new Error('Sessions download changed the source');
+    saveTarget = null;
+    await win.webContents.executeJavaScript(`[...document.querySelectorAll('.prose .file-main')].forEach(button => button.click())`);
+    await until(win, `[...document.querySelectorAll('.code-lang')].map(e => e.textContent).join() === 'totals.csv,Python,HTML,Mermaid,KeyLevels.pine,Sessions.pine'`, 'file card previews reveal the complete source');
     await clickText(win, '.code-btn', 'Preview');
     await until(win, `[...document.querySelectorAll('.snippet-table td')].map(e => e.textContent).join() === 'North,12,South,9'`, 'CSV preview shows a table');
     await until(win, `(() => { const svg = document.querySelector('.mermaid-svg svg'); return !!svg && ['Plan', 'Build', 'Ship'].every(t => svg.textContent.includes(t)); })()`, 'a Mermaid block opens as a drawn diagram', 15000);
@@ -316,7 +333,9 @@ app.whenReady().then(async () => {
     await clickText(win, '.settings .row .btn', 'Disconnect');
     await until(win, `document.querySelector('.settings .row .status').textContent === 'Off'`, 'connector disconnects');
     await clickText(win, '.settings .btn', 'Add a connector');
-    await until(win, `document.querySelectorAll('.preset-grid .preset').length === 5`, 'connector presets');
+    await until(win, `document.querySelectorAll('.preset-grid .preset').length === 6`, 'connector presets');
+    await clickText(win, '.preset-grid .preset', 'OpenMarket');
+    await until(win, `[...document.querySelectorAll('.settings .field input')].some(input => input.value === 'https://mcp.openmarket.xyz/') && document.querySelector('.settings .check input[type="checkbox"]')?.checked === true`, 'OpenMarket preset uses the MCP endpoint with OAuth');
     await shot(win, '4-connectors');
     await clickText(win, '.settings-nav button', 'General');
     await until(win, `[...document.querySelectorAll('.settings .segmented')][0] && [...document.querySelectorAll('.settings .segmented')][0].textContent === 'DarkLightSystem' && !document.querySelector('.palette')`, 'appearance has dark, light, and system and no palettes');

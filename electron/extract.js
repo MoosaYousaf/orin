@@ -76,7 +76,11 @@ async function readText(file, limit = 400000) {
   try {
     const buffer = Buffer.alloc(limit * 4);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    return buffer.subarray(0, bytesRead).toString('utf8').slice(0, limit);
+    const bytes = buffer.subarray(0, bytesRead);
+    if (bytes.includes(0)) return null;
+    // A read at the limit may end halfway through a character. Stream decoding keeps that tail pending.
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: bytesRead === buffer.length }).slice(0, limit); }
+    catch { return null; }
   } finally { await handle.close(); }
 }
 async function extractText(file) {
@@ -87,7 +91,7 @@ async function extractText(file) {
     const names = (await run('unzip', ['-Z1', file])).split('\n');
     return /\.pptx$/i.test(file) ? pptx(file, names) : xlsx(file, names);
   }
-  return null;
+  return readText(file);
 }
 
 const supported = file => TEXT.test(file) || /\.pdf$/i.test(file) || TEXTUTIL.test(file) || OFFICE_ZIP.test(file);
@@ -96,7 +100,7 @@ const supported = file => TEXT.test(file) || /\.pdf$/i.test(file) || TEXTUTIL.te
 async function cachedText(folder, name) {
   const source = path.join(folder, name);
   if (TEXT.test(name)) return readText(source);
-  if (!supported(name)) return null;
+  if (!supported(name)) return readText(source);
   const cache = path.join(folder, '.text', `${name}.txt`);
   const [src, out] = await Promise.all([fs.stat(source), fs.stat(cache).catch(() => null)]);
   if (out && out.mtimeMs >= src.mtimeMs) return readText(cache);

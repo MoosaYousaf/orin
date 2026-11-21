@@ -9,6 +9,15 @@ const CALLBACK_PORT = 33418;
 const REDIRECT = `http://127.0.0.1:${CALLBACK_PORT}/callback`;
 const slug = text => text.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'server';
 
+// OpenMarket's setup link is documentation, not a Streamable HTTP endpoint.
+function serverUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.origin === 'https://mcp.openmarket.xyz' && url.pathname === '/llms.txt') return 'https://mcp.openmarket.xyz/';
+  } catch {}
+  return value;
+}
+
 // OAuth state for one remote server, kept in the encrypted secrets file.
 class OAuthProvider {
   constructor(secrets, id) { this.secrets = secrets; this.key = `mcp-oauth:${id}`; this.interactive = false; this.pendingUrl = null; }
@@ -31,6 +40,13 @@ class Mcp {
     Object.assign(this, { store, secrets, openExternal, onChange });
     this.live = new Map(); // id -> { client, transport, tools }
     this.status = new Map(); // id -> { state, error, toolCount }
+    let corrected = false;
+    for (const server of store.data.mcpServers) {
+      if (server.transport !== 'http') continue;
+      const url = serverUrl(server.url);
+      if (url !== server.url) { server.url = url; corrected = true; }
+    }
+    if (corrected) store.save();
   }
   config(id) {
     const server = this.store.data.mcpServers.find(s => s.id === id);
@@ -38,6 +54,37 @@ class Mcp {
     return { ...server, ...(this.secrets.get(`mcp:${id}`) || {}) };
   }
   enabledConfigs() { return this.store.data.mcpServers.filter(s => s.enabled).map(s => this.config(s.id)); }
+  // Claude runs headlessly, so it cannot complete its own /mcp sign-in prompt. Reuse the sign-in
+  // the user approved in Orin. Credentials only enter the CLI's private temporary config, never the renderer.
+  // signIn(server) asks the user and resolves true to open the browser sign-in; onSkip(server, reason) reports a connector left out.
+  async claudeConfigs({ signIn, onSkip } = {}) {
+    const configs = [];
+    for (const server of this.enabledConfigs()) {
+      if (!server.oauth || server.transport === 'stdio') { configs.push(server); continue; }
+      try {
+        await this.ready(server, signIn);
+        const tokens = new OAuthProvider(this.secrets, server.id).tokens();
+        if (!tokens?.access_token || (tokens.token_type && tokens.token_type.toLowerCase() !== 'bearer')) throw new Error('no usable sign-in');
+        const headers = Object.fromEntries(Object.entries(server.headers || {}).filter(([key]) => key.toLowerCase() !== 'authorization'));
+        configs.push({ ...server, oauth: false, headers: { ...headers, Authorization: `Bearer ${tokens.access_token}` } });
+      } catch (error) { onSkip?.(server, error.message); }
+    }
+    return configs;
+  }
+  // Connects one server and makes one request, which lets the SDK refresh an expired access token.
+  // When the server needs a sign-in, signIn decides whether to run the browser sign-in now.
+  async ready(server, signIn) {
+    try {
+      const entry = await this.connect(server.id);
+      await entry.client.listTools();
+      return entry;
+    } catch (error) {
+      if (!server.oauth || !(error instanceof UnauthorizedError)) throw error;
+      await this.disconnect(server.id);
+      if (!signIn || !await signIn(server)) throw new Error('sign-in skipped');
+      return this.authorize(server.id);
+    }
+  }
   setStatus(id, value) { this.status.set(id, value); this.onChange(); }
   statuses() { return Object.fromEntries(this.status); }
 
@@ -63,6 +110,7 @@ class Mcp {
       this.setStatus(id, { state: 'connected', toolCount: tools.length });
       return entry;
     } catch (error) {
+      await client.close().catch(() => {});
       const needsAuth = error instanceof UnauthorizedError;
       this.setStatus(id, { state: needsAuth ? 'needs-auth' : 'error', error: needsAuth ? 'Sign in to connect.' : error.message });
       throw error;
@@ -119,11 +167,11 @@ class Mcp {
   }
 
   // Tools from every enabled server, named server__tool so model tool names stay unique and valid.
-  async tools() {
+  async tools({ signIn, onSkip } = {}) {
     const result = [];
     for (const server of this.store.data.mcpServers.filter(s => s.enabled)) {
       let entry;
-      try { entry = await this.connect(server.id); } catch { continue; }
+      try { entry = this.live.get(server.id) || await this.ready(this.config(server.id), signIn); } catch (error) { onSkip?.(server, error.message); continue; }
       for (const tool of entry.tools) {
         const qualified = `${slug(server.name)}__${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
         result.push({ qualified, serverId: server.id, server: server.name, name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema || { type: 'object', properties: {} } });
@@ -140,4 +188,4 @@ class Mcp {
   async closeAll() { await Promise.all([...this.live.keys()].map(id => this.disconnect(id))); }
 }
 
-module.exports = { Mcp, REDIRECT };
+module.exports = { Mcp, REDIRECT, serverUrl };

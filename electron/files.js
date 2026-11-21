@@ -9,7 +9,9 @@ const { cachedText, extractText, supported } = require('./extract');
 // Word, RTF, and OpenDocument files are made from HTML with textutil; PDF through printPdf (Electron's printer).
 const MAX_FILE = 50 * 1024 * 1024;
 const PROMPT_BUDGET = 200000; // characters of attachment text per message
-const TEXT_OUT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|xml|svg|css|js|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sh|sql|ini|cfg|log|tex|rst|org)$/i;
+// Unknown extensions may be text source (Pine Script, shader languages, config files, etc.).
+// Reject known binary formats rather than limiting scripts to a list of languages.
+const BINARY_OUT = /\.(zip|gz|bz2|xz|7z|rar|tar|png|jpe?g|gif|webp|heic|avif|ico|icns|bmp|tiff?|mp[34]|mov|wav|ogg|flac|aac|m4a|webm|avi|woff2?|ttf|otf|eot|exe|dll|dylib|so|dmg|pkg|app|wasm|sqlite3?|db|doc|xlsx?|pptx?|parquet|npy|npz|bin)$/i;
 const RICH_OUT = /\.(docx|rtf|odt|pdf|html?)$/i;
 const MEDIA = {
   pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword',
@@ -109,25 +111,29 @@ class Files {
   }
 
   // Writes a file in the format its extension names. Rich formats take HTML (or simple Markdown).
-  async render(target, content) {
+  async render(target, content, { raw = false } = {}) {
     const name = path.basename(target);
-    if (TEXT_OUT.test(name)) return fs.writeFile(target, String(content));
+    if (BINARY_OUT.test(name)) throw new Error(`Orin cannot make ${path.extname(name)} from text. Use a text format, .html, .docx, .rtf, .odt, or .pdf.`);
+    if (raw) {
+      if (/\.(docx|pdf|rtf|odt)$/i.test(name)) throw new Error('Source code needs a text file extension.');
+      return fs.writeFile(target, String(content));
+    }
     if (/\.html?$/i.test(name)) return fs.writeFile(target, htmlDocument(content, name));
     if (/\.pdf$/i.test(name)) {
       if (!this.printPdf) throw new Error('PDF output is not available.');
       return fs.writeFile(target, await this.printPdf(htmlDocument(content, name)));
     }
     if (RICH_OUT.test(name)) return textutil(htmlDocument(content, name), target);
-    throw new Error(`Orin cannot make ${path.extname(name) || 'files without an extension'}. Use a text format, .html, .docx, .rtf, .odt, or .pdf.`);
+    return fs.writeFile(target, String(content));
   }
 
-  async write(threadId, name, content) {
+  async write(threadId, name, content, options) {
     name = safeName(name);
     if (String(content ?? '').length > MAX_FILE) throw new Error('The file is too large.');
     const dir = this.dir(threadId, 'out');
     await fs.mkdir(dir, { recursive: true });
     const target = await unique(dir, name);
-    await this.render(target, content ?? '');
+    await this.render(target, content ?? '', options);
     return this.part(target);
   }
 

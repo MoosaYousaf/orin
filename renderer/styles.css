@@ -187,7 +187,9 @@ kbd { font-size: 10.5px; color: var(--text-3); margin-left: auto; letter-spacing
 .rewind-note { padding: 7px 9px; }
 .msg-action:hover { color: var(--text); background: var(--hover); }
 .msg-meta { font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
-.msg-error { display: flex; gap: 8px; align-items: flex-start; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); border-radius: 8px; padding: 9px 12px; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-error > span { flex: 1; min-width: 0; }
+.msg-error-action { margin-left: auto; }
+.msg-error { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); border-radius: 8px; padding: 9px 12px; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-image { max-width: 260px; max-height: 220px; border-radius: 8px; display: block; margin: 4px 0 6px auto; }
 
 .prose { font-size: 14.5px; line-height: 1.65; overflow-wrap: anywhere; }
@@ -553,7 +555,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .usage-ring:hover { background: var(--hover); }
 .usage-ring circle { fill: none; stroke-width: 2.2; }
 .usage-track { stroke: var(--border-strong); }
-.usage-fill { stroke: var(--text-2); stroke-linecap: round; }
+.usage-fill { stroke: var(--text-2); stroke-linecap: butt; }
 .usage-ring.high .usage-fill { stroke: var(--warning); }
 .usage-ring.full .usage-fill { stroke: var(--danger); }
 .usage-ring { position: relative; }

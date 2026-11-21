@@ -24,7 +24,7 @@ function cliPath(name, refresh = false) {
   return found;
 }
 
-// Claude Code accepts Orin's MCP servers directly. OAuth servers are skipped: the CLI signs in to those itself.
+// OAuth configs are resolved by Mcp.claudeConfigs after the user's Orin sign-in. Unresolved ones stay out.
 function claudeMcpConfig(servers) {
   const mcpServers = {};
   for (const s of servers) {
@@ -35,17 +35,18 @@ function claudeMcpConfig(servers) {
 }
 
 // The prompt always goes through stdin, so prompt text can never be parsed as a CLI option.
-function command(cli, { sessionId, model = '', effort = '', mode = 'auto', mcpConfig }) {
+function command(cli, { sessionId, model = '', effort = '', mode = 'auto', mcpConfig, system = '' }) {
   const modelArgs = model ? ['--model', model] : [];
   if (cli === 'claude') {
     // The prompt goes to stdin as a stream-json message, and permission prompts and questions come back as control requests.
     // In "ask" Orin shows the permission prompts; in the other modes it denies them, as the CLI does without a person.
     const permission = { ask: ['--permission-mode', 'default'], default: ['--permission-mode', 'default'], read: ['--permission-mode', 'plan'], auto: ['--permission-mode', 'acceptEdits'], full: ['--permission-mode', 'bypassPermissions'] }[mode];
-    return ['-p', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...permission, ...modelArgs, ...(effort ? ['--effort', effort] : []), ...(sessionId ? ['--resume', sessionId] : []), ...(mcpConfig ? ['--mcp-config', mcpConfig] : [])];
+    return ['-p', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...permission, ...modelArgs, ...(effort ? ['--effort', effort] : []), ...(sessionId ? ['--resume', sessionId] : []), ...(mcpConfig ? ['--mcp-config', mcpConfig] : []), ...(system ? ['--append-system-prompt', system] : [])];
   }
   if (cli === 'codex') {
     const access = { default: [], read: ['--sandbox', 'read-only', '-c', 'approval_policy="never"'], auto: ['--sandbox', 'workspace-write', '-c', 'approval_policy="never"'], full: ['--dangerously-bypass-approvals-and-sandbox'] }[mode];
-    return ['exec', '--json', '--skip-git-repo-check', ...access, ...modelArgs, ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), ...(sessionId ? ['resume', sessionId] : []), '-'];
+    // --search is a top-level option: the model's own web search tool, which needs no sandbox network access.
+    return ['--search', 'exec', '--json', '--skip-git-repo-check', ...access, ...modelArgs, ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), ...(sessionId ? ['resume', sessionId] : []), '-'];
   }
   if (cli === 'gemini') {
     const access = { default: ['--approval-mode', 'default'], read: ['--approval-mode', 'plan'], auto: ['--approval-mode', 'auto_edit'], full: ['--approval-mode', 'yolo'] }[mode];
@@ -80,7 +81,11 @@ function apply(cli, event, draft) {
     } else if (event.type === 'user') {
       for (const block of event.message?.content || []) if (block.type === 'tool_result') draft.toolResult(block.tool_use_id, { output: asText(block.content), isError: !!block.is_error });
     } else if (event.type === 'result') {
-      if (event.is_error) throw new Error(asText(event.result) || 'Claude Code reported an error.');
+      if (event.is_error) {
+        const message = asText(event.result) || (event.errors || []).join('\n') || 'Claude Code reported an error.';
+        if (event.error === 'authentication_failed' || signedOut('claude', message)) throw signInError(PRESET_NAMES.claude);
+        throw new Error(message);
+      }
       if (!draft.hasText() && event.result) draft.write('text', event.result);
       const window = Math.max(0, ...Object.values(event.modelUsage || {}).map(m => m.contextWindow || 0));
       if (draft.usage && window) draft.usage.window = window;
@@ -122,6 +127,31 @@ function apply(cli, event, draft) {
   return null;
 }
 
+// A signed-out CLI fails its turn with one of these messages. Codex patterns are guesses from its error texts.
+const SIGNED_OUT = {
+  claude: /OAuth session expired|Not logged in|Please run \/login|Login expired|Failed to authenticate|Invalid API key · Please run/i,
+  codex: /Not logged in|codex login|401 Unauthorized|refresh token .*(expired|already been used|revoked)|token_expired|re-?authenticate/i
+};
+const PRESET_NAMES = { claude: 'Claude Code', codex: 'Codex' };
+const signedOut = (cli, text) => !!SIGNED_OUT[cli]?.test(String(text || ''));
+function signInError(name) {
+  return Object.assign(new Error(`${name} is signed out or its sign-in expired. Select Sign in and finish the page in your browser. Orin then sends your message again.`), { signIn: true });
+}
+// The CLI's own browser sign-in. Only CLIs with a non-interactive login command are listed.
+const LOGIN = { claude: ['auth', 'login', '--claudeai'], codex: ['login'] };
+function login(cli, { signal } = {}) {
+  const executable = cliPath(cli);
+  if (!executable || !LOGIN[cli]) return Promise.reject(new Error('This CLI has no sign-in command Orin can run. Sign in from Terminal.'));
+  const child = track(spawn(executable, LOGIN[cli], { cwd: os.homedir(), env: { ...process.env, PATH: searchPath().join(path.delimiter), NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'], signal }));
+  let output = '';
+  const keep = chunk => { output = (output + chunk).slice(-4000); };
+  child.stdout.on('data', keep); child.stderr.on('data', keep);
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', code => (code === 0 ? resolve() : reject(new Error(output.trim().split('\n').at(-1) || `Sign-in exited with code ${code}.`))));
+  });
+}
+
 const DECLINED = 'The user declined this tool call.';
 const NOT_ASKED = 'This access mode does not allow actions that need approval. The user can choose Ask first to approve them.';
 const SKIPPED = 'The user skipped the questions.';
@@ -138,7 +168,7 @@ async function run(options) {
 const EXIT_GRACE_MS = 400;
 const RESULT_GRACE_MS = 3000;
 
-function runTurn({ preset, thread, history, prompt, cwd, mcpServers, draft, signal, onSession, approve, question, onSuggestion }) {
+function runTurn({ preset, thread, history, prompt, system, cwd, mcpServers, draft, signal, onSession, approve, question, onSuggestion }) {
   const executable = cliPath(preset.cli);
   if (!executable) throw new Error(`${preset.name} is not installed or not on PATH.`);
   let resume = thread.replay ? null : thread.sessionId;
@@ -154,7 +184,7 @@ function runTurn({ preset, thread, history, prompt, cwd, mcpServers, draft, sign
     mcpConfig = path.join(configDir, 'config.json');
     fs.writeFileSync(mcpConfig, JSON.stringify(claudeMcpConfig(mcpServers)), { mode: 0o600 });
   }
-  const args = command(preset.cli, { ...thread, sessionId: resume, mcpConfig });
+  const args = command(preset.cli, { ...thread, sessionId: resume, mcpConfig, system });
   let child;
   try { child = track(spawn(executable, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })); }
   catch (error) { if (configDir) fs.rmSync(configDir, { recursive: true, force: true }); throw error; }
@@ -244,9 +274,9 @@ function runTurn({ preset, thread, history, prompt, cwd, mcpServers, draft, sign
       if (exitCode === null) stop();
       cleanupConfig();
       if (signal.aborted) resolve({ stopped: true });
-      else if (failure) reject(failure);
+      else if (failure) reject(signedOut(preset.cli, failure.message) && !failure.signIn ? signInError(preset.name) : failure);
       else if (code === 0) resolve({});
-      else reject(new Error(stderr.trim() || `${preset.name} exited with ${killedBy || `code ${code}`}.`));
+      else reject(signedOut(preset.cli, stderr) ? signInError(preset.name) : new Error(stderr.trim() || `${preset.name} exited with ${killedBy || `code ${code}`}.`));
     };
     let exitCode = null;
     ended = () => { if (!timer) timer = setTimeout(() => finish(0), RESULT_GRACE_MS); };
@@ -294,4 +324,4 @@ const children = new Set();
 function track(child) { children.add(child); child.once('exit', () => children.delete(child)); child.once('error', () => children.delete(child)); return child; }
 function closeAll() { for (const child of children) child.kill('SIGKILL'); children.clear(); }
 
-module.exports = { closeAll, claudeMcpConfig, searchPath, cliPath, command, apply, run, complete, completeArgs };
+module.exports = { closeAll, claudeMcpConfig, searchPath, cliPath, command, apply, run, complete, completeArgs, login, signedOut, LOGIN };

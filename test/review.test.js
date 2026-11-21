@@ -142,7 +142,7 @@ test('review: engine source checksum is enforced before any build command runs',
 test('review: text extraction is bounded and malformed catalog values are ignored', async () => {
   const root = tmp();
   try {
-    const file = path.join(root, 'large.log'); fs.writeFileSync(file, 'a'); fs.truncateSync(file, 20 * 1024 * 1024);
+    const file = path.join(root, 'large.log'); fs.writeFileSync(file, Buffer.alloc(20 * 1024 * 1024, 'a'));
     assert.equal((await extractText(file)).length, 400000);
     const result = shorten({ anthropic: { models: { bad: null, alsoBad: { id: 42 }, good: { id: 'claude-test', name: {}, release_date: [], cost: { output: 'expensive' } } } } });
     assert.deepEqual(result.anthropic, [{ id: 'claude-test', name: 'claude-test', release: '', input: null, output: null, context: null }]);

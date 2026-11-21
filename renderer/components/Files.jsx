@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Markdown from 'react-markdown';
@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { Eye, Copy, Check, Download, MoreHorizontal, ExternalLink, FolderOpen, Play, File, FileText, FileSpreadsheet, FileImage, FileCode, FileType } from 'lucide-react';
 import { Menu, MenuItem } from './Menu.jsx';
 import { call, toast } from '../store.js';
+export { snippetName, LABELS } from '../file-names.mjs';
 
 // The thread that file actions belong to. Main checks every path against this thread's folder and workspace.
 export const ThreadContext = createContext(null);
@@ -38,11 +39,23 @@ function IconAction({ label, onClick, children }) {
 }
 
 // One file in a conversation: an attachment, a file the model made, or a file an agent wrote in the workspace.
-export function FileCard({ file }) {
+export function FileCard({ file, onPreview }) {
   const threadId = useContext(ThreadContext);
   const [copied, setCopied] = useState(false);
   const [menu, setMenu] = useState(null);
-  const act = (channel, done) => () => call(channel, threadId, file.path).then(done, toast);
+  // Fenced source becomes a real conversation file only when an action needs it.
+  const materialized = useRef(null);
+  const act = (channel, done) => async () => {
+    try {
+      if (channel === 'files:preview' && onPreview) return onPreview();
+      if (!file.path && !materialized.current) {
+        materialized.current = call('files:snippet', threadId, file.name, file.content).catch(error => { materialized.current = null; throw error; });
+      }
+      const saved = file.path ? file : await materialized.current;
+      const result = await call(channel, threadId, saved.path);
+      done?.(result);
+    } catch (error) { toast(error); }
+  };
   const Icon = fileIcon(file.name);
   return (
     <div className="file-card" role="group" aria-label={file.name}>
@@ -93,8 +106,8 @@ export function ToolFiles({ part }) {
 }
 
 // Saves text as a file through a save dialog. Rich formats get HTML.
-export async function exportText({ name, text, html }) {
-  try { const saved = await call('files:export', { name, text, html }); if (saved) toast(`Saved to ${saved}`); } catch (error) { toast(error); }
+export async function exportText({ name, text, html, raw = false }) {
+  try { const saved = await call('files:export', { name, text, html, raw }); if (saved) toast(`Saved to ${saved}`); } catch (error) { toast(error); }
 }
 
 // The download menu of a whole reply: Markdown, Word, or PDF.
@@ -108,23 +121,6 @@ export function ExportMenu({ text, anchor, onClose }) {
       <MenuItem icon={FileType} onClick={save('pdf')}>PDF (.pdf)</MenuItem>
     </Menu>
   );
-}
-
-// Code fence languages to file extensions, for snippet downloads.
-const EXTENSIONS = {
-  javascript: 'js', js: 'js', jsx: 'jsx', typescript: 'ts', ts: 'ts', tsx: 'tsx', python: 'py', py: 'py', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh', console: 'sh',
-  json: 'json', jsonl: 'jsonl', html: 'html', css: 'css', scss: 'scss', csv: 'csv', tsv: 'tsv', markdown: 'md', md: 'md', yaml: 'yaml', yml: 'yml', toml: 'toml',
-  sql: 'sql', go: 'go', rust: 'rs', rs: 'rs', java: 'java', kotlin: 'kt', swift: 'swift', c: 'c', cpp: 'cpp', 'c++': 'cpp', csharp: 'cs', cs: 'cs', ruby: 'rb', rb: 'rb',
-  php: 'php', xml: 'xml', svg: 'svg', mermaid: 'mermaid', mmd: 'mermaid', text: 'txt', txt: 'txt', plaintext: 'txt', diff: 'diff', dockerfile: 'Dockerfile', makefile: 'Makefile', lua: 'lua', r: 'r', dart: 'dart'
-};
-export const LABELS = { html: 'HTML', css: 'CSS', json: 'JSON', csv: 'CSV', tsv: 'TSV', sql: 'SQL', svg: 'SVG', xml: 'XML', go: 'Go', js: 'JavaScript', jsx: 'JSX', ts: 'TypeScript', tsx: 'TSX', py: 'Python', sh: 'Shell', md: 'Markdown', rs: 'Rust', rb: 'Ruby', cs: 'C#', cpp: 'C++', kt: 'Kotlin', yml: 'YAML', yaml: 'YAML', txt: 'Text', mermaid: 'Mermaid' };
-
-// The file name for a snippet: a name in the fence info (```python app.py or title="app.py"), else snippet.<ext>.
-export function snippetName(language, meta = '') {
-  const named = meta.match(/(?:title|file(?:name)?)=["']?([^"'\s]+)/)?.[1] || meta.split(/\s+/).find(t => /^[\w.\-/]+\.[a-z0-9]+$/i.test(t));
-  if (named) return named.split('/').pop();
-  const extension = EXTENSIONS[language?.toLowerCase()] || (language && /^[a-z0-9]{1,8}$/i.test(language) ? language.toLowerCase() : 'txt');
-  return /^[A-Z]/.test(extension) ? extension : `snippet.${extension}`;
 }
 
 // A small CSV/TSV parser for previews: quotes, escaped quotes, and new lines in quotes.

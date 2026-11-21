@@ -35,6 +35,21 @@ test('files: attach, write in each format, and only resolve paths of the thread 
     const csv = await files.write('t1', 'report.csv', 'a,b\n1,2\n');
     assert.equal(fs.readFileSync(csv.path, 'utf8'), 'a,b\n1,2\n');
     assert.equal((await files.write('t1', 'report.csv', 'x')).name, 'report 2.csv');
+    const source = '//@version=6\nindicator("Key Levels")\nplot(close)\n';
+    for (const name of ['KeyLevels.pine', 'Sessions.pinescript', 'shader.glsl', 'component.svelte', 'Dockerfile', 'custom.myformat']) {
+      const script = await files.write('t1', name, source);
+      assert.equal(fs.readFileSync(script.path, 'utf8'), source);
+      const [attachedScript] = await files.attach('t1', [script.path]);
+      const texts = await files.promptTexts([{ parts: [attachedScript] }]);
+      assert.equal(texts.get(attachedScript.path), source, `${name} is readable when attached again`);
+    }
+    const htmlSource = '<script>console.log("exact source")</script>\n';
+    const snippet = await files.write('t1', 'source.html', htmlSource, { raw: true });
+    assert.equal(fs.readFileSync(snippet.path, 'utf8'), htmlSource);
+    const binary = path.join(outside, 'opaque.unknown');
+    fs.writeFileSync(binary, Buffer.from([0xff, 0xfe, 0x80]));
+    const [binaryPart] = await files.attach('t1', [binary]);
+    assert.equal((await files.promptTexts([{ parts: [binaryPart] }])).get(binaryPart.path), null);
     const pdf = await files.write('t1', 'summary.pdf', '<h1>Summary</h1><p>Ship on <strong>Friday</strong>.</p>');
     assert.equal(fs.readFileSync(pdf.path, 'utf8'), '%PDF-1.4 fake');
     assert.match(printed[0], /<!doctype html>[\s\S]*<style>[\s\S]*<h1>Summary<\/h1>/);
@@ -138,6 +153,8 @@ test('runner: attachments reach the API model as text and images, and write_file
     assert.equal(user[0].source.data, PNG.toString('base64'));
     assert.equal(user[1].text, '<attachment name="sales.csv">\nregion,amount\nNorth,7\nNorth,5\n\n</attachment>\n\nTotal by region as a CSV file.');
     assert.ok(fake.requests[0].tools.some(t => t.name === 'orin__write_file'));
+    assert.match(fake.requests[0].system, /complete file/);
+    assert.match(fake.requests[0].system, /Prefer orin__write_file/);
     const messages = store.thread(thread.id).messages;
     assert.deepEqual(messages[0].parts.map(p => p.type), ['file', 'file', 'text']);
     const reply = messages.at(-1);

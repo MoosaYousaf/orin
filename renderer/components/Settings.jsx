@@ -96,6 +96,7 @@ function ModelsPane() {
 }
 
 const CONNECTOR_PRESETS = [
+  { label: 'OpenMarket', note: 'Sign in to connect your charts.', value: { name: 'OpenMarket', transport: 'http', url: 'https://mcp.openmarket.xyz/', oauth: true } },
   { label: 'Notion', note: 'Sign in with your Notion account.', value: { name: 'Notion', transport: 'http', url: 'https://mcp.notion.com/mcp', oauth: true } },
   { label: 'GitHub', note: 'Needs a personal access token.', value: { name: 'GitHub', transport: 'http', url: 'https://api.githubcopilot.com/mcp/', headers: [['Authorization', 'Bearer ']] } },
   { label: 'Files', note: 'Read and write one folder on this Mac.', value: { name: 'Files', transport: 'stdio', command: 'npx', args: '-y @modelcontextprotocol/server-filesystem ~/Documents' } },

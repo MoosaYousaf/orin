@@ -19,7 +19,7 @@ Orin runs on macOS 12 Monterey and later, including Intel Macs. It pins Electron
 - Chats use the same model sources as code. Subscription chat apps (claude.ai, ChatGPT, Gemini) have no public API for other apps, so chats with a subscription go through its CLI with read-only tools.
 - A model picker for every connected model. You can switch models in the middle of a conversation. A model from the same provider continues with the full native history. A model from a different provider gets a text transcript.
 - Streaming Markdown replies, thought summaries, and expandable tool calls.
-- MCP connectors over stdio or Streamable HTTP, including OAuth sign-in (for example, Notion). API and local models ask before each tool call, unless you choose **Allow tools**. Claude Code receives the connectors that do not use OAuth.
+- MCP connectors over stdio or Streamable HTTP, including OAuth sign-in (for example, Notion and OpenMarket). API and local models ask before each tool call, unless you choose **Allow tools**. Claude Code also receives OAuth connectors after you connect them in Orin; their credentials pass through a private temporary CLI config. For OpenMarket use `https://mcp.openmarket.xyz/`; its `llms.txt` link is documentation.
 - Image attachments for API and local models.
 - Branching: start a new branch from any of your messages, then edit and send it again.
 - Rewind: return to before any of your messages. Rewind the conversation, the workspace files, or both. Before each turn in a Git workspace, Orin saves a checkpoint of every file that `.gitignore` does not exclude. It uses a private index, so your index, branches, and stash do not change. Git can delete checkpoints older than two weeks.
@@ -27,6 +27,7 @@ Orin runs on macOS 12 Monterey and later, including Intel Macs. It pins Electron
 - Questions: the model can ask you multiple-choice questions during a turn. Claude Code (AskUserQuestion), Codex in **Ask first**, and API and local models (a `orin__ask_user` tool) support them.
 - Files in and out of conversations:
   - Attach any file with **+**, drag and drop, or paste. Orin copies it into the conversation. Text from PDF, Word, RTF, OpenDocument, PowerPoint, Excel, CSV, and text files goes to every model. API models get images as images. CLI agents also get each file's path.
+  - Completed code blocks appear as downloadable file cards, including in existing replies. Click Preview to expand the source. Pine Script downloads use `.pine`; other text scripts and config files keep their own extensions, including extensionless files such as Dockerfile. Models are instructed to return complete files when creating or splitting scripts.
   - Code blocks have their own bar: the language or file name, **Preview** for HTML, SVG, Markdown, and CSV, **Download** as a file with the right extension, and **Copy**.
   - **Run** opens an HTML snippet or HTML file with JavaScript on, in its own window. That window has its own in-memory session, no Node.js, and no access to Orin, your files, or your keys. Permission requests (camera, microphone, location) are denied. It can load from the internet, so CDN libraries work. The inline **Preview** keeps scripts off.
   - API and local models can make files with the `orin__write_file` tool: text formats, `.html`, `.docx`, `.rtf`, `.odt`, and `.pdf`.

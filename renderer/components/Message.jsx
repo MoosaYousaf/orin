@@ -1,12 +1,13 @@
-import { memo, useState, useRef, useLayoutEffect, useEffect } from 'react';
+import { createContext, useContext, memo, useState, useRef, useLayoutEffect, useEffect } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChevronRight, Check, Copy, Wrench, CircleAlert, Ban, Clock, GitBranch, RotateCcw, Pencil, Download, Eye, Code, Play } from 'lucide-react';
 import { Working } from './Mark.jsx';
-import { FileCard, ToolFiles, ExportMenu, exportText, markdownHtml, snippetName, previewKind, SnippetPreview, LABELS } from './Files.jsx';
+import { FileCard, ToolFiles, ExportMenu, exportText, snippetName, previewKind, SnippetPreview, LABELS } from './Files.jsx';
 import { useStore, answerApproval, answerQuestion, guard, call, toast, copyText } from '../store.js';
 
 const plugins = [remarkGfm];
+const ArtifactContext = createContext(false);
 
 // A fenced code block with its own bar: the language or file name, Preview for HTML, SVG, Markdown, and CSV,
 // Download as a file, and Copy. The text comes from the Markdown tree, so it is exact.
@@ -14,17 +15,22 @@ const hastText = node => (node?.type === 'text' ? node.value : (node?.children |
 function CodeBlock({ node, children, ...props }) {
   const code = node?.children?.find(c => c.tagName === 'code');
   const language = [].concat(code?.properties?.className || []).find(c => String(c).startsWith('language-'))?.slice(9) || '';
-  const name = snippetName(language, code?.data?.meta || '');
   const text = hastText(code).replace(/\n$/, '');
+  const name = snippetName(language, code?.data?.meta || '', text);
+  const artifact = useContext(ArtifactContext);
   const kind = previewKind(name);
   const [copied, setCopied] = useState(false);
   // Diagrams open drawn, as in Claude; other previews open on request.
   const [preview, setPreview] = useState(kind === 'mermaid');
+  const [open, setOpen] = useState(false);
   const copy = async () => { if (await copyText(text, 'Code')) { setCopied(true); setTimeout(() => setCopied(false), 1400); } };
   const named = !name.startsWith('snippet.');
   const extension = name.split('.').pop();
-  const download = () => exportText({ name, text, html: kind === 'md' ? markdownHtml(text) : kind === 'html' ? text : '' });
+  const download = () => exportText({ name, text, raw: true });
   return (
+    <>
+    {artifact ? <FileCard key={`${name}:${text}`} file={{ name, content: text, size: new TextEncoder().encode(text).length }} onPreview={() => setOpen(value => !value)} /> : null}
+    {(!artifact || open || kind === 'mermaid') ? (
     <div className="code-block">
       <div className="code-bar">
         <span className="code-lang">{named ? name : LABELS[extension] || language || 'Text'}</span>
@@ -35,12 +41,14 @@ function CodeBlock({ node, children, ...props }) {
       </div>
       {preview ? <SnippetPreview kind={kind} text={text} /> : <pre {...props}>{children}</pre>}
     </div>
+    ) : null}
+    </>
   );
 }
 const markdownComponents = { pre: CodeBlock, a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> };
 
-const Prose = memo(function Prose({ text }) {
-  return <div className="prose"><Markdown remarkPlugins={plugins} components={markdownComponents}>{text}</Markdown></div>;
+const Prose = memo(function Prose({ text, artifacts = false }) {
+  return <ArtifactContext.Provider value={artifacts}><div className="prose"><Markdown remarkPlugins={plugins} components={markdownComponents}>{text}</Markdown></div></ArtifactContext.Provider>;
 });
 
 function Thinking({ text, live }) {
@@ -83,6 +91,16 @@ function ToolCall({ part, live }) {
 
 function Approval({ request }) {
   const act = decision => guard(() => answerApproval(request.id, decision));
+  if (request.kind === 'sign-in') return (
+    <div className="approval" role="alertdialog" aria-label="Connector sign-in">
+      <div className="approval-title"><strong>{request.server}</strong> needs you to sign in.</div>
+      <div className="approval-detail">Sign in opens its page in your browser. The reply continues after you approve. Skip continues without {request.server}.</div>
+      <div className="approval-actions">
+        <button className="btn" onClick={act('deny')}>Skip</button>
+        <button className="btn primary" onClick={act('allow')}>Sign in</button>
+      </div>
+    </div>
+  );
   return (
     <div className="approval" role="alertdialog" aria-label="Tool approval">
       <div className="approval-title">Allow <strong>{request.server}</strong> to run <code>{request.tool}</code>?</div>
@@ -133,9 +151,9 @@ function Question({ request }) {
   );
 }
 
-function Parts({ parts, live }) {
+function Parts({ parts, live, artifacts = false }) {
   return parts.map((part, i) => {
-    if (part.type === 'text') return part.text ? <Prose key={i} text={part.text} /> : null;
+    if (part.type === 'text') return part.text ? <Prose key={i} text={part.text} artifacts={artifacts && !live} /> : null;
     if (part.type === 'thinking') return <Thinking key={i} text={part.text} live={live && i === parts.length - 1} />;
     if (part.type === 'tool') return <ToolCall key={part.id || i} part={part} live={live} />;
     if (part.type === 'file') return <FileCard key={part.path} file={part} />;
@@ -208,7 +226,7 @@ function EditBox({ message, onSave, onCancel }) {
 // How the Overseer chose the model of a reply.
 const ROUTE_BY = { same: 'Same kind of task, so the model stayed the same (no router call).', router: 'The router model chose this model.', rules: 'Orin\'s fixed rules chose this model.' };
 
-export const Message = memo(function Message({ message, modelLabel, onBranch, onRewind, onEdit, busy }) {
+export const Message = memo(function Message({ message, modelLabel, onBranch, onRewind, onEdit, onSignIn, busy }) {
   const [menu, setMenu] = useState(false);
   const [editing, setEditing] = useState(false);
   if (message.role === 'user') {
@@ -230,13 +248,21 @@ export const Message = memo(function Message({ message, modelLabel, onBranch, on
     <article className="msg assistant">
       <div className="msg-meta">{modelLabel}{message.route?.effort ? ` · ${message.route.effort}` : ''}{message.duration ? ` · ${elapsed(message.duration)}` : ''}{message.stopped ? ' · stopped' : ''}
         {message.route ? <span className="msg-route" title={ROUTE_BY[message.route.by]}> · Overseer: {message.route.reason}</span> : null}</div>
-      <Parts parts={message.parts} />
-      {message.error ? <div className="msg-error"><CircleAlert size={14} /> {message.error}</div> : null}
+      <Parts parts={message.parts} artifacts={!message.stopped && !message.error} />
+      {message.error ? <div className="msg-error"><CircleAlert size={14} /><span>{message.error}</span>
+        {message.signIn && onSignIn && !busy ? <SignInButton onSignIn={() => onSignIn(message)} /> : null}</div> : null}
       {!message.parts.length && !message.error ? <div className="muted">No response.</div> : null}
       {textOf(message) ? <div className="msg-actions start"><CopyAction message={message} /><DownloadAction message={message} /></div> : null}
     </article>
   );
 });
+
+// The CLI's sign-in can take minutes in the browser, so the button shows that it waits.
+function SignInButton({ onSignIn }) {
+  const [waiting, setWaiting] = useState(false);
+  const click = async () => { setWaiting(true); try { await onSignIn(); } finally { setWaiting(false); } };
+  return <button className="btn primary msg-error-action" disabled={waiting} onClick={click}>{waiting ? 'Waiting for the browser…' : 'Sign in'}</button>;
+}
 
 // Elapsed time as Claude Code shows it: 42s, 1m 05s, 1h 02m.
 export function elapsed(ms) {

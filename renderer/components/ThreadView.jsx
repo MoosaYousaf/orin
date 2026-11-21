@@ -69,6 +69,13 @@ export function ThreadView({ threadId, panes = 1, index = 0 }) {
     await call('run:send', thread.id, { text, images, files, editMessageId: message.id });
     setDraft(thread.id, '');
   });
+  // Sign in, then send the user message before the failed reply again. The failed reply is replaced.
+  const signIn = guard(async reply => {
+    await call('cli:sign-in', reply.signIn);
+    const all = thread.messages;
+    const user = all.slice(0, all.findIndex(m => m.id === reply.id)).findLast(m => m.role === 'user');
+    if (user) await edit(user, user.parts.filter(p => p.type === 'text').map(p => p.text).join('\n\n'));
+  });
   const messages = thread.messages.slice(-count);
   return (
     <ThreadContext.Provider value={thread.id}>
@@ -86,7 +93,7 @@ export function ThreadView({ threadId, panes = 1, index = 0 }) {
               <p>{currentLabel} in <strong>{workspace.name}</strong>. Switch models below at any time, even mid-conversation.</p>
             </div>
           ) : null}
-          {messages.map(m => <Message key={m.id} message={m} modelLabel={m.role === 'assistant' ? modelLabel(app, m.connectionId || thread.connectionId, m.model ?? thread.model) : ''} onBranch={branch} onRewind={rewind} onEdit={edit} busy={running} />)}
+          {messages.map(m => <Message key={m.id} message={m} modelLabel={m.role === 'assistant' ? modelLabel(app, m.connectionId || thread.connectionId, m.model ?? thread.model) : ''} onBranch={branch} onRewind={rewind} onEdit={edit} onSignIn={signIn} busy={running} />)}
           {running ? <LiveMessage threadId={threadId} modelLabel={currentLabel} /> : null}
         </div>
       </div>
