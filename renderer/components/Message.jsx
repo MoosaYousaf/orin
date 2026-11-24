@@ -27,10 +27,13 @@ function CodeBlock({ node, children, ...props }) {
   const named = !name.startsWith('snippet.');
   const extension = name.split('.').pop();
   const download = () => exportText({ name, text, raw: true });
+  // Only a block with a file name is a deliverable file and collapses to a card. An unnamed block (an email,
+  // a message, a command to copy) stays open, so its text shows without a click.
+  const card = artifact && named;
   return (
     <>
-    {artifact ? <FileCard key={`${name}:${text}`} file={{ name, content: text, size: new TextEncoder().encode(text).length }} onPreview={() => setOpen(value => !value)} /> : null}
-    {(!artifact || open || kind === 'mermaid') ? (
+    {card ? <FileCard key={`${name}:${text}`} file={{ name, content: text, size: new TextEncoder().encode(text).length }} onPreview={() => setOpen(value => !value)} /> : null}
+    {(!card || open || kind === 'mermaid') ? (
     <div className="code-block">
       <div className="code-bar">
         <span className="code-lang">{named ? name : LABELS[extension] || language || 'Text'}</span>
